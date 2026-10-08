@@ -2,17 +2,19 @@
   {
     "source_name": "Project Gutenberg",
     "url": "https://www.gutenberg.org/",
-    "license": "Public domain / site terms vary by item",
-    "allowed": false,
-    "license_notes": "Specific work must be checked before use",
-    "checked_by": "Human"
+    "approval_status": "PENDING",
+    "license_rule": "Verify each work",
+    "automation_allowed": false,
+    "checked_by": "Human",
+    "notes": "Source is not approved for automated story retrieval yet."
   },
   {
     "source_name": "Wikisource",
     "url": "https://wikisource.org/",
-    "license": "Varies by work",
-    "allowed": false,
-    "license_notes": "Specific work must be checked before use",
-    "checked_by": "Human"
+    "approval_status": "PENDING",
+    "license_rule": "Public domain or compatible free license; verify each work",
+    "automation_allowed": false,
+    "checked_by": "Human",
+    "notes": "Verify the specific work license or public-domain status before use."
   }
 ]
