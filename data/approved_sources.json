@@ -1,0 +1,18 @@
+[
+  {
+    "source_name": "Project Gutenberg",
+    "url": "https://www.gutenberg.org/",
+    "license": "Public domain / site terms vary by item",
+    "allowed": false,
+    "license_notes": "Specific work must be checked before use",
+    "checked_by": "Human"
+  },
+  {
+    "source_name": "Wikisource",
+    "url": "https://wikisource.org/",
+    "license": "Varies by work",
+    "allowed": false,
+    "license_notes": "Specific work must be checked before use",
+    "checked_by": "Human"
+  }
+]
