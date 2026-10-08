@@ -20,10 +20,11 @@
 {
   "source_name": "Standard Ebooks",
   "url": "https://standardebooks.org/",
-  "approval_status": "PENDING",
-  "license_rule": "Content produced by Standard Ebooks is dedicated to CC0 1.0 Public Domain",
-  "automation_allowed": false,
+  "approval_status": "APPROVED",
+  "license_rule": "Content produced by Standard Ebooks is dedicated to the public domain via CC0 1.0",
+  "automation_allowed": true,
+  "feed_url": "https://standardebooks.org/feeds/atom/new-releases",
   "checked_by": "Human",
-  "notes": "Verify each specific work before use. Do not assume every website item has the same copyright status."
+  "notes": "Use Standard Ebooks-produced content only. Verify the specific work before publishing."
   }
 ]
