@@ -16,5 +16,14 @@
     "automation_allowed": false,
     "checked_by": "Human",
     "notes": "Verify the specific work license or public-domain status before use."
+  ,
+{
+  "source_name": "Standard Ebooks",
+  "url": "https://standardebooks.org/",
+  "approval_status": "PENDING",
+  "license_rule": "Content produced by Standard Ebooks is dedicated to CC0 1.0 Public Domain",
+  "automation_allowed": false,
+  "checked_by": "Human",
+  "notes": "Verify each specific work before use. Do not assume every website item has the same copyright status."
   }
 ]
