@@ -1,4 +1,4 @@
-name: Gemini API Test
+name: PyonPyin Story Writer Test
 
 on: [workflow_dispatch]
 
@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Gemini API
+      - name: Generate Myanmar Story
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -16,4 +16,10 @@ jobs:
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
             -H "x-goog-api-key: ${GEMINI_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d '{"contents":[{"parts":[{"text":"Say hello to PyonPyin in one short sentence."}]}]}'
+            -d '{
+              "contents": [{
+                "parts": [{
+                  "text": "You are PyonPyin Story Writer.\n\nYour job is to adapt an approved source story into a clear, natural and engaging Myanmar-language story.\n\nRules:\n1. Use only the source story provided.\n2. Do not invent important facts that are not in the source.\n3. Write in natural, easy-to-understand Myanmar language.\n4. Keep the main meaning and important events of the original story.\n5. Do not copy the source text word-for-word.\n6. Create a short title.\n7. Create 3 simple quiz questions with answers.\n8. Create 1 short reflection question.\n9. Do not include copyrighted text verbatim.\n10. Return ONLY valid JSON.\n\nRequired JSON format:\n{\n  \"title\": \"...\",\n  \"story\": \"...\",\n  \"quiz\": [\n    {\"question\": \"...\", \"answer\": \"...\"},\n    {\"question\": \"...\", \"answer\": \"...\"},\n    {\"question\": \"...\", \"answer\": \"...\"}\n  ],\n  \"reflection\": \"...\"\n}\n\nSource story:\nOnce there was a thirsty crow. It found a pot with a little water inside. The crow dropped small stones into the pot until the water rose high enough to drink.\n\nReturn only the JSON result."
+                }]
+              }]
+            }'
