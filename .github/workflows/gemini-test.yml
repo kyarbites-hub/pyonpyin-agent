@@ -1,1 +1,30 @@
 
+name: Gemini API Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-gemini:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Call Gemini API
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          RESPONSE=$(curl -s \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
+            -H "x-goog-api-key: $GEMINI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d '{
+              "contents": [{
+                "parts": [{
+                  "text": "Say hello to PyonPyin in one short sentence."
+                }]
+              }]
+            }')
+
+          echo "$RESPONSE"
+          
