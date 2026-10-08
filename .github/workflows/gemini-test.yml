@@ -1,8 +1,7 @@
 
 name: Gemini API Test
 
-on:
-  workflow_dispatch:
+on: [workflow_dispatch]
 
 jobs:
   test-gemini:
@@ -25,6 +24,5 @@ jobs:
                 }]
               }]
             }')
-
           echo "$RESPONSE"
           
