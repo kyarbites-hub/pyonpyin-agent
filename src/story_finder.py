@@ -206,7 +206,7 @@ def main():
     # Google Sheets API ကို ချိတ်မယ်
     service = connect_google_sheets()
    # လိုင်စင်အတည်ပြုထားတဲ့စာအုပ်တွေကို စစ်မယ်
-approved_books = get_license_approved_books(service)
+    approved_books = get_license_approved_books(service)
 
 print(f"Books approved for next stage: {len(approved_books)}")
 
