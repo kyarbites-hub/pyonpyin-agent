@@ -222,6 +222,36 @@ def remove_duplicate_books(books):
     print(f"Books after duplicate check: {len(unique_books)}")
 
     return unique_books
+def filter_existing_books(service, books):
+    """Google Sheets ထဲမှာ ရှိပြီးသားစာအုပ်တွေကို ဖယ်ရှားမယ်။"""
+
+    # SourceQueue ထဲက ရှိပြီးသား URL တွေကို ဖတ်မယ်
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="SourceQueue!A2:G"
+    ).execute()
+
+    rows = result.get("values", [])
+
+    # ရှိပြီးသား URL တွေကို Set ထဲမှာ သိမ်းမယ်
+    existing_urls = set()
+
+    for row in rows:
+        if len(row) > 1 and row[1].strip():
+            existing_urls.add(row[1].strip().rstrip("/"))
+
+    # Sheet ထဲမှာ မရှိသေးတဲ့စာအုပ်တွေကိုသာ ရွေးမယ်
+    new_books = []
+
+    for book in books:
+        url = book.get("url", "").strip().rstrip("/")
+
+        if url and url not in existing_urls:
+            new_books.append(book)
+
+    print(f"New books not in Google Sheets: {len(new_books)}")
+
+    return new_books
 def main():
     """PyonPyin AI Agent ရဲ့ အဓိကလုပ်ဆောင်ချက်။"""
 
