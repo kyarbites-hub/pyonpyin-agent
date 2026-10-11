@@ -6,25 +6,25 @@
     "license_rule": "Verify each work",
     "automation_allowed": false,
     "checked_by": "Human",
-    "notes": "Source is not approved for automated story retrieval yet."
+    "notes": "Verify each work before use."
   },
   {
     "source_name": "Wikisource",
     "url": "https://wikisource.org/",
     "approval_status": "PENDING",
-    "license_rule": "Public domain or compatible free license; verify each work",
+    "license_rule": "Verify each work",
     "automation_allowed": false,
     "checked_by": "Human",
-    "notes": "Verify the specific work license or public-domain status before use."
-  ,
-{
-  "source_name": "Standard Ebooks",
-  "url": "https://standardebooks.org/",
-  "approval_status": "APPROVED",
-  "license_rule": "Content produced by Standard Ebooks is dedicated to the public domain via CC0 1.0",
-  "automation_allowed": true,
-  "feed_url": "https://standardebooks.org/feeds/atom/new-releases",
-  "checked_by": "Human",
-  "notes": "Use Standard Ebooks-produced content only. Verify the specific work before publishing."
+    "notes": "Verify the specific work before use."
+  },
+  {
+    "source_name": "Standard Ebooks",
+    "url": "https://standardebooks.org/",
+    "approval_status": "APPROVED",
+    "license_rule": "Verify each work",
+    "automation_allowed": true,
+    "feed_url": "https://standardebooks.org/feeds/atom/new-releases",
+    "checked_by": "Human",
+    "notes": "Verify the specific work before publishing."
   }
 ]
