@@ -19,6 +19,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       # Story Finder ကို စမ်းသပ်မယ်
       - name: Run Story Finder
         env:
