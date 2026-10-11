@@ -256,28 +256,46 @@ def main():
     """PyonPyin AI Agent ရဲ့ အဓိကလုပ်ဆောင်ချက်။"""
 
     try:
-        # အဆင့် ၁: Google Sheets နဲ့ ချိတ်ဆက်မယ်
+        # အဆင့် ၁: Google Sheets ကို ချိတ်ဆက်မယ်
         print("Connecting to Google Sheets...")
         service = connect_google_sheets()
 
-        # အဆင့် ၂: လိုင်စင်အတည်ပြုထားတဲ့စာအုပ်တွေကို ဖတ်မယ်
-        print("Checking license-approved books...")
+        # အဆင့် ၂: လိုင်စင်အတည်ပြုထားတဲ့စာအုပ်တွေကို စစ်မယ်
         approved_books = get_license_approved_books(service)
+        print(f"License-approved books: {len(approved_books)}")
 
-        # အဆင့် ၃: ရလဒ်ကို ပြမယ်
-        print(
-            f"Books approved for next stage: "
-            f"{len(approved_books)}"
-        )
+        # အဆင့် ၃: Source စာရင်းကို ဖတ်မယ်
+        sources = load_approved_sources()
 
-        # အဆင့် ၄: လက်ရှိမှာ AI ဆီ မပို့သေးဘူး
-        print("License review check completed.")
-        print("AI story generation is not started yet.")
-        print("Auto publishing is disabled.")
+        for source in sources:
+            feed_url = source.get("feed_url")
+
+            if not feed_url:
+                continue
+
+            print(f"\nChecking source: {source['source_name']}")
+
+            # အဆင့် ၄: စာအုပ်အသစ်တွေကို ရယူမယ်
+            books = fetch_new_books(feed_url)
+            print(f"Books found: {len(books)}")
+
+            # အဆင့် ၅: စာရင်းတစ်ခုအတွင်း ထပ်နေမှုကို ဖယ်မယ်
+            books = remove_duplicate_books(books)
+
+            # အဆင့် ၆: Google Sheets ထဲမှာ ရှိပြီးသားစာအုပ်တွေကို ဖယ်မယ်
+            new_books = filter_existing_books(service, books)
+
+            print(f"New books ready for review: {len(new_books)}")
+
+            # အခုအဆင့်မှာ အသစ်တွေကို သိမ်းတာ မလုပ်သေးဘူး
+            print("New books are waiting for the next save step.")
+
+        print("\nDuplicate check completed.")
+        print("AI story generation is not started.")
+        print("Auto publishing remains disabled.")
 
     except Exception as error:
-        # ပြဿနာရှိရင် Error ကို ပြမယ်
-        print(f"Story Finder failed: {error}")
+        print(f"Story Finder failed: {type(error).__name__}")
         raise
 
 
