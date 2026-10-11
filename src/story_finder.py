@@ -21,7 +21,7 @@ SOURCES_FILE = BASE_DIR / "data" / "approved_sources.json"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Google Sheet ID
-SPREADSHEET_ID = "1qTC6NH6HM4slo6XT-C4fffaVK1eQ44MGL6fARQ07ul4"
+SPREADSHEET_ID = "1qTC6NH6HM4sIo6XT-C4fffaVK1eQ44MGL6fARQ07uI4"
 
 # စမ်းသပ်ဖတ်ရှုမယ့် Sheet အမည်နှင့် Range
 SHEET_RANGE = "Stories!A1:G1"
