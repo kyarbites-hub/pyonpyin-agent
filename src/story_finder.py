@@ -154,9 +154,7 @@ def fetch_new_books(feed_url):
         })
 
     return books
-
-
-        def main():
+def main():
     """Google Sheets ကို စမ်းသပ်ပြီး စာအုပ်စာရင်းကို ရှာဖွေသိမ်းမယ်။"""
 
     print("Connecting to Google Sheets...")
