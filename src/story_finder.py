@@ -185,8 +185,13 @@ def main():
                 print(f"- {book['title']}")
                 print(f"  URL: {book['url']}")
                 print(f"  Status: {book['status']}")
-                save_books_to_sheet(service,books,source["source_name
-                     )
+                # စာအုပ်စာရင်းကို Google Sheets ထဲ သိမ်းမယ်
+save_books_to_sheet(
+    service,
+    books,
+    source["source_name"]
+)
+                
 
         except Exception as error:
             # Token သို့မဟုတ် လျှို့ဝှက်အချက်အလက်ကို မထုတ်ပြဘဲ Error ကို ပြမယ်
