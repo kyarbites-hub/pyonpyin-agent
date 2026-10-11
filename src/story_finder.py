@@ -156,16 +156,15 @@ def fetch_new_books(feed_url):
     return books
 
 
-def main():
-    """Google Sheets ကို စမ်းသပ်ပြီး Story Finder ကို ဆက်လည်ပတ်မယ်။"""
+        def main():
+    """Google Sheets ကို စမ်းသပ်ပြီး စာအုပ်စာရင်းကို ရှာဖွေသိမ်းမယ်။"""
 
-    # အဆင့် 1: Google Sheets ချိတ်ဆက်မှုကို စမ်းမယ်
     print("Connecting to Google Sheets...")
 
+    # Google Sheets API ကို ချိတ်မယ်
     service = connect_google_sheets()
-    test_google_sheets(service)
 
-    # အဆင့် 2: အတည်ပြုထားတဲ့ Source တွေက စာအုပ်စာရင်းကို ရှာမယ်
+    # Source စာရင်းကို ဖတ်မယ်
     sources = load_approved_sources()
 
     for source in sources:
@@ -177,16 +176,17 @@ def main():
 
         print(f"\nChecking source: {source['source_name']}")
 
-                try:
+        try:
             books = fetch_new_books(feed_url)
             print(f"Books found: {len(books)}")
 
+            # စာအုပ်စာရင်းကို Console မှာ ပြမယ်
             for book in books[:5]:
                 print(f"- {book['title']}")
                 print(f"  URL: {book['url']}")
                 print(f"  Status: {book['status']}")
 
-            # စာအုပ်စာရင်းကို Google Sheets ထဲ သိမ်းမယ်
+            # ရှာတွေ့တဲ့စာအုပ်တွေကို Google Sheets ထဲ သိမ်းမယ်
             save_books_to_sheet(
                 service,
                 books,
