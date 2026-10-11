@@ -199,49 +199,32 @@ def fetch_new_books(feed_url):
 
     return books
 def main():
-    """Google Sheets ကို စမ်းသပ်ပြီး စာအုပ်စာရင်းကို ရှာဖွေသိမ်းမယ်။"""
+    """PyonPyin AI Agent ရဲ့ အဓိကလုပ်ဆောင်ချက်။"""
 
-    print("Connecting to Google Sheets...")
+    try:
+        # အဆင့် ၁: Google Sheets နဲ့ ချိတ်ဆက်မယ်
+        print("Connecting to Google Sheets...")
+        service = connect_google_sheets()
 
-    # Google Sheets API ကို ချိတ်မယ်
-    service = connect_google_sheets()
-   # လိုင်စင်အတည်ပြုထားတဲ့စာအုပ်တွေကို စစ်မယ်
-    approved_books = get_license_approved_books(service)
+        # အဆင့် ၂: လိုင်စင်အတည်ပြုထားတဲ့စာအုပ်တွေကို ဖတ်မယ်
+        print("Checking license-approved books...")
+        approved_books = get_license_approved_books(service)
 
-print(f"Books approved for next stage: {len(approved_books)}")
+        # အဆင့် ၃: ရလဒ်ကို ပြမယ်
+        print(
+            f"Books approved for next stage: "
+            f"{len(approved_books)}"
+        )
 
-    # Source စာရင်းကို ဖတ်မယ်
-    sources = load_approved_sources()
+        # အဆင့် ၄: လက်ရှိမှာ AI ဆီ မပို့သေးဘူး
+        print("License review check completed.")
+        print("AI story generation is not started yet.")
+        print("Auto publishing is disabled.")
 
-    for source in sources:
-        feed_url = source.get("feed_url")
-
-        if not feed_url:
-            print(f"Skipping {source.get('source_name')}: no feed URL")
-            continue
-
-        print(f"\nChecking source: {source['source_name']}")
-
-        try:
-            books = fetch_new_books(feed_url)
-            print(f"Books found: {len(books)}")
-
-            # စာအုပ်စာရင်းကို Console မှာ ပြမယ်
-            for book in books[:5]:
-                print(f"- {book['title']}")
-                print(f"  URL: {book['url']}")
-                print(f"  Status: {book['status']}")
-
-            # ရှာတွေ့တဲ့စာအုပ်တွေကို Google Sheets ထဲ သိမ်းမယ်
-            save_books_to_sheet(
-                service,
-                books,
-                source["source_name"]
-            )
-
-        except Exception as error:
-            print(f"Could not fetch or save books: {type(error).__name__}")
-            raise
+    except Exception as error:
+        # ပြဿနာရှိရင် Error ကို ပြမယ်
+        print(f"Story Finder failed: {error}")
+        raise
 
 
 if __name__ == "__main__":
