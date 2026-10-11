@@ -177,7 +177,7 @@ def main():
 
         print(f"\nChecking source: {source['source_name']}")
 
-        try:
+                try:
             books = fetch_new_books(feed_url)
             print(f"Books found: {len(books)}")
 
@@ -185,17 +185,16 @@ def main():
                 print(f"- {book['title']}")
                 print(f"  URL: {book['url']}")
                 print(f"  Status: {book['status']}")
-                # စာအုပ်စာရင်းကို Google Sheets ထဲ သိမ်းမယ်
-save_books_to_sheet(
-    service,
-    books,
-    source["source_name"]
-)
-                
+
+            # စာအုပ်စာရင်းကို Google Sheets ထဲ သိမ်းမယ်
+            save_books_to_sheet(
+                service,
+                books,
+                source["source_name"]
+            )
 
         except Exception as error:
-            # Token သို့မဟုတ် လျှို့ဝှက်အချက်အလက်ကို မထုတ်ပြဘဲ Error ကို ပြမယ်
-            print(f"Could not fetch books: {type(error).__name__}")
+            print(f"Could not fetch or save books: {type(error).__name__}")
             raise
 
 
