@@ -260,38 +260,43 @@ def main():
         print("Connecting to Google Sheets...")
         service = connect_google_sheets()
 
-        # အဆင့် ၂: လိုင်စင်အတည်ပြုထားတဲ့စာအုပ်တွေကို စစ်မယ်
-        approved_books = get_license_approved_books(service)
-        print(f"License-approved books: {len(approved_books)}")
-
-        # အဆင့် ၃: Source စာရင်းကို ဖတ်မယ်
+        # အဆင့် ၂: Source စာရင်းကို ဖတ်မယ်
         sources = load_approved_sources()
 
         for source in sources:
             feed_url = source.get("feed_url")
 
+            # Feed URL မရှိရင် ဒီ Source ကို ကျော်မယ်
             if not feed_url:
                 continue
 
             print(f"\nChecking source: {source['source_name']}")
 
-            # အဆင့် ၄: စာအုပ်အသစ်တွေကို ရယူမယ်
+            # အဆင့် ၃: စာအုပ်အသစ်တွေကို ရှာမယ်
             books = fetch_new_books(feed_url)
             print(f"Books found: {len(books)}")
 
-            # အဆင့် ၅: စာရင်းတစ်ခုအတွင်း ထပ်နေမှုကို ဖယ်မယ်
+            # အဆင့် ၄: Feed ထဲမှာ ထပ်နေတဲ့စာအုပ်တွေကို ဖယ်မယ်
             books = remove_duplicate_books(books)
 
-            # အဆင့် ၆: Google Sheets ထဲမှာ ရှိပြီးသားစာအုပ်တွေကို ဖယ်မယ်
+            # အဆင့် ၅: Google Sheets ထဲမှာ ရှိပြီးသားစာအုပ်တွေကို ဖယ်မယ်
             new_books = filter_existing_books(service, books)
-
             print(f"New books ready for review: {len(new_books)}")
 
-            # အခုအဆင့်မှာ အသစ်တွေကို သိမ်းတာ မလုပ်သေးဘူး
-            print("New books are waiting for the next save step.")
+            # အဆင့် ၆: စာအုပ်အသစ်တွေကို Google Sheets ထဲ သိမ်းမယ်
+            if new_books:
+                save_books_to_sheet(
+                    service,
+                    new_books,
+                    source["source_name"]
+                )
+                print(f"Saved {len(new_books)} new books.")
+            else:
+                print("No new books to save.")
 
-        print("\nDuplicate check completed.")
-        print("AI story generation is not started.")
+        print("\nStory Finder completed successfully.")
+        print("All new books still require license review.")
+        print("AI story generation has not started.")
         print("Auto publishing remains disabled.")
 
     except Exception as error:
