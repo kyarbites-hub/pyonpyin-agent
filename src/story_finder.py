@@ -123,45 +123,61 @@ def save_books_to_sheet(service, books, source_name):
 
     print(f"New books saved: {len(new_rows)}")
 def get_license_approved_books(service):
-    """လူကိုယ်တိုင် စစ်ဆေးအတည်ပြုထားသော စာအုပ်များကို ရယူမယ်။"""
+    """လူကိုယ်တိုင် စစ်ဆေးထားသော စာအုပ်များကို စစ်ထုတ်မယ်။"""
 
+    # A-K ကော်လံအထိ ဖတ်မယ်
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range="SourceQueue!A2:G"
+        range="SourceQueue!A2:K"
     ).execute()
 
     rows = result.get("values", [])
     approved_books = []
 
     for row in rows:
-        # ကော်လံ ၇ ခု ပြည့်စုံအောင် စစ်မယ်
-        row += [""] * (7 - len(row))
+        # ကော်လံ ၁၁ ခု ပြည့်စုံအောင် အလွတ်နေရာတွေ ဖြည့်မယ်
+        row = row + [""] * (11 - len(row))
 
         title = row[0].strip()
         source_url = row[1].strip()
+        source_name = row[2].strip()
         license_status = row[3].strip().upper()
         license_evidence = row[5].strip()
         human_reviewer = row[6].strip()
 
-        # အထောက်အထားနဲ့ လူကိုယ်တိုင်စစ်ဆေးသူ ရှိမှ လက်ခံမယ်
+        # H-K ကော်လံများမှ License Review အချက်အလက်တွေ ဖတ်မယ်
+        original_copyright = row[7].strip().upper()
+        translation_copyright = row[8].strip().upper()
+        thailand_rights_checked = row[9].strip().upper()
+        myanmar_translation_rights = row[10].strip().upper()
+
+        # လိုအပ်တဲ့ အချက်အလက်အားလုံး ပြည့်စုံမှ ရွေးချယ်မယ်
         if (
             title
             and source_url
             and license_status == "APPROVED"
             and license_evidence
             and human_reviewer
+            and original_copyright == "CHECKED"
+            and translation_copyright == "CHECKED"
+            and thailand_rights_checked == "YES"
+            and myanmar_translation_rights == "YES"
         ):
             approved_books.append({
                 "title": title,
                 "source_url": source_url,
-                "source_name": row[2].strip(),
+                "source_name": source_name,
                 "license_status": license_status,
                 "license_evidence": license_evidence,
                 "human_reviewer": human_reviewer,
+                "original_copyright": original_copyright,
+                "translation_copyright": translation_copyright,
+                "thailand_rights_checked": thailand_rights_checked,
+                "myanmar_translation_rights": myanmar_translation_rights,
             })
 
     print(
-        f"Human-reviewed, license-approved books: "
+        "Human-reviewed, license-approved books: "
         f"{len(approved_books)}"
     )
 
