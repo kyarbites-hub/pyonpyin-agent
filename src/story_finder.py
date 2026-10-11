@@ -198,6 +198,30 @@ def fetch_new_books(feed_url):
         })
 
     return books
+def remove_duplicate_books(books):
+    """URL တူညီတဲ့ စာအုပ်တွေကို တစ်အုပ်တည်းသာ ထားမယ်။"""
+
+    unique_books = []
+    seen_urls = set()
+
+    for book in books:
+        # URL ကို ဖတ်ပြီး အပို Space တွေ ဖယ်ရှားမယ်
+        book_url = book.get("url", "").strip().rstrip("/")
+
+        # URL မရှိရင် ကျော်မယ်
+        if not book_url:
+            continue
+
+        # URL တူပြီးသားဆိုရင် ထပ်မထည့်ဘူး
+        if book_url in seen_urls:
+            continue
+
+        seen_urls.add(book_url)
+        unique_books.append(book)
+
+    print(f"Books after duplicate check: {len(unique_books)}")
+
+    return unique_books
 def main():
     """PyonPyin AI Agent ရဲ့ အဓိကလုပ်ဆောင်ချက်။"""
 
