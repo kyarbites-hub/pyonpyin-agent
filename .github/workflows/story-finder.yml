@@ -21,4 +21,6 @@ jobs:
 
       # Story Finder ကို စမ်းသပ်မယ်
       - name: Run Story Finder
+        env:
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
         run: python src/story_finder.py
