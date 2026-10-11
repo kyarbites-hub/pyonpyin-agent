@@ -70,22 +70,58 @@ def connect_google_sheets():
     return service
 
 
-def test_google_sheets(service):
-    """Stories Sheet ရဲ့ Header တွေကိုသာ ဖတ်ပြီး ချိတ်ဆက်မှု စမ်းမယ်။"""
+def save_books_to_sheet(service, books, source_name):
+    """စာအုပ်စာရင်းကို SourceQueue ထဲ သိမ်းမယ်။"""
 
+    # လက်ရှိစာရင်းကို ဖတ်ပြီး ထပ်နေတဲ့ URL တွေကို စစ်မယ်
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range=SHEET_RANGE
+        range="SourceQueue!A2:E"
     ).execute()
 
-    headers = result.get("values", [])
+    existing_rows = result.get("values", [])
 
-    if not headers:
-        print("⚠️ Stories Sheet မှာ Header မတွေ့ပါ။")
+    # ရှိပြီးသား Source URL တွေကို Set ထဲထည့်မယ်
+    existing_urls = {
+        row[1]
+        for row in existing_rows
+        if len(row) > 1 and row[1]
+    }
+
+    new_rows = []
+
+    for book in books:
+        url = book.get("url", "").strip()
+
+        # URL မရှိရင်၊ ရှိပြီးသား URL ဖြစ်ရင် ကျော်မယ်
+        if not url or url in existing_urls:
+            continue
+
+        new_rows.append([
+            book.get("title", "Untitled"),
+            url,
+            source_name,
+            "NEEDS_LICENSE_REVIEW",
+            "PENDING_REVIEW"
+        ])
+
+        # ဒီတစ်ကြိမ်အတွင်း ထပ်နေမှုကိုလည်း ကာကွယ်မယ်
+        existing_urls.add(url)
+
+    if not new_rows:
+        print("New books to save: 0")
         return
 
-    print("✅ Google Sheets ချိတ်ဆက်မှု အောင်မြင်ပါပြီ!")
-    print("Headers:", headers[0])
+    # စာအုပ်အသစ်တွေကို Sheet ရဲ့ အောက်ဆုံးမှာ ထည့်မယ်
+    service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range="SourceQueue!A:E",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": new_rows}
+    ).execute()
+
+    print(f"New books saved: {len(new_rows)}")
 
 
 def fetch_new_books(feed_url):
@@ -149,6 +185,8 @@ def main():
                 print(f"- {book['title']}")
                 print(f"  URL: {book['url']}")
                 print(f"  Status: {book['status']}")
+                save_books_to_sheet(service,books,source["source_name
+                     )
 
         except Exception as error:
             # Token သို့မဟုတ် လျှို့ဝှက်အချက်အလက်ကို မထုတ်ပြဘဲ Error ကို ပြမယ်
