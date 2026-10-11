@@ -24,7 +24,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = "1qTC6NH6HM4sIo6XT-C4fffaVK1eQ44MGL6fARQ07uI4"
 
 # စမ်းသပ်ဖတ်ရှုမယ့် Sheet အမည်နှင့် Range
-SHEET_RANGE = "Stories!A1:G1"
+SHEET_RANGE = "SourceQueue!A1:E1"
 
 
 def load_approved_sources():
