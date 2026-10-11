@@ -1,0 +1,24 @@
+name: PyonPyin Story Finder
+
+# GitHub ကနေ ကိုယ်တိုင်စမ်းသပ်နိုင်ရန်
+on:
+  workflow_dispatch:
+
+jobs:
+  test-story-finder:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Repository ထဲက ဖိုင်တွေကို ယူမယ်
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Python တပ်ဆင်မယ်
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Story Finder ကို စမ်းသပ်မယ်
+      - name: Run Story Finder
+        run: python src/story_finder.py
