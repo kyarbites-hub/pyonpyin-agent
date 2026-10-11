@@ -122,6 +122,50 @@ def save_books_to_sheet(service, books, source_name):
     ).execute()
 
     print(f"New books saved: {len(new_rows)}")
+def get_license_approved_books(service):
+    """Google Sheets မှ လိုင်စင်အတည်ပြုထားတဲ့ စာအုပ်တွေကိုသာ ဖတ်မယ်။"""
+
+    # SourceQueue ထဲက လိုင်စင်အခြေအနေကို ဖတ်မယ်
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range="SourceQueue!A2:G"
+    ).execute()
+
+    rows = result.get("values", [])
+    approved_books = []
+
+    for row in rows:
+        # ကော်လံ ၇ ခု မပြည့်စုံရင် ကျော်မယ်
+        if len(row) < 7:
+            continue
+
+        title = row[0].strip()
+        source_url = row[1].strip()
+        source_name = row[2].strip()
+        license_status = row[3].strip().upper()
+        evidence_url = row[5].strip()
+        reviewer = row[6].strip()
+
+        # လိုင်စင်အတည်ပြုပြီး အထောက်အထားနဲ့ စစ်ဆေးသူပါမှသာ ခွင့်ပြုမယ်
+        if (
+            license_status == "APPROVED"
+            and evidence_url
+            and reviewer
+            and title
+            and source_url
+        ):
+            approved_books.append({
+                "title": title,
+                "url": source_url,
+                "source_name": source_name,
+                "license_status": license_status,
+                "license_evidence": evidence_url,
+                "reviewer": reviewer
+            })
+
+    print(f"License-approved books: {len(approved_books)}")
+
+    return approved_books
 
 
 def fetch_new_books(feed_url):
