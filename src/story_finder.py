@@ -123,9 +123,8 @@ def save_books_to_sheet(service, books, source_name):
 
     print(f"New books saved: {len(new_rows)}")
 def get_license_approved_books(service):
-    """Google Sheets မှ လိုင်စင်အတည်ပြုထားတဲ့ စာအုပ်တွေကိုသာ ဖတ်မယ်။"""
+    """လူကိုယ်တိုင် စစ်ဆေးအတည်ပြုထားသော စာအုပ်များကို ရယူမယ်။"""
 
-    # SourceQueue ထဲက လိုင်စင်အခြေအနေကို ဖတ်မယ်
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
         range="SourceQueue!A2:G"
@@ -135,38 +134,38 @@ def get_license_approved_books(service):
     approved_books = []
 
     for row in rows:
-        # ကော်လံ ၇ ခု မပြည့်စုံရင် ကျော်မယ်
-        if len(row) < 7:
-            continue
+        # ကော်လံ ၇ ခု ပြည့်စုံအောင် စစ်မယ်
+        row += [""] * (7 - len(row))
 
         title = row[0].strip()
         source_url = row[1].strip()
-        source_name = row[2].strip()
         license_status = row[3].strip().upper()
-        evidence_url = row[5].strip()
-        reviewer = row[6].strip()
+        license_evidence = row[5].strip()
+        human_reviewer = row[6].strip()
 
-        # လိုင်စင်အတည်ပြုပြီး အထောက်အထားနဲ့ စစ်ဆေးသူပါမှသာ ခွင့်ပြုမယ်
+        # အထောက်အထားနဲ့ လူကိုယ်တိုင်စစ်ဆေးသူ ရှိမှ လက်ခံမယ်
         if (
-            license_status == "APPROVED"
-            and evidence_url
-            and reviewer
-            and title
+            title
             and source_url
+            and license_status == "APPROVED"
+            and license_evidence
+            and human_reviewer
         ):
             approved_books.append({
                 "title": title,
-                "url": source_url,
-                "source_name": source_name,
+                "source_url": source_url,
+                "source_name": row[2].strip(),
                 "license_status": license_status,
-                "license_evidence": evidence_url,
-                "reviewer": reviewer
+                "license_evidence": license_evidence,
+                "human_reviewer": human_reviewer,
             })
 
-    print(f"License-approved books: {len(approved_books)}")
+    print(
+        f"Human-reviewed, license-approved books: "
+        f"{len(approved_books)}"
+    )
 
     return approved_books
-
 
 def fetch_new_books(feed_url):
     """Atom feed မှ စာအုပ်စာရင်းကို ရယူမယ်။"""
