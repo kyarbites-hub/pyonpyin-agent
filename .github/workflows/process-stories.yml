@@ -1,0 +1,45 @@
+name: PyonPyin Rights-Cleared Story Processing
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "47 2 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pyonpyin-processing
+  cancel-in-progress: false
+
+jobs:
+  process-selected-stories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Verify Gemini API key is configured
+        if: vars.PYONPYIN_GEMINI_AUTOMATION_ENABLED == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::error::GEMINI_API_KEY is missing from GitHub Actions Secrets."
+            exit 1
+          fi
+      - name: Process one opt-in, policy-safe draft
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+          GOOGLE_SPREADSHEET_ID: ${{ vars.GOOGLE_SPREADSHEET_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          PYONPYIN_GEMINI_AUTOMATION_ENABLED: ${{ vars.PYONPYIN_GEMINI_AUTOMATION_ENABLED }}
+          PYONPYIN_PUBLISHING_ENABLED: "false"
+        run: python src/process_stories.py

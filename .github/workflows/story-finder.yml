@@ -1,29 +1,38 @@
 name: PyonPyin Story Finder
 
-# GitHub ကနေ ကိုယ်တိုင်စမ်းသပ်နိုင်ရန်
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pyonpyin-discovery
+  cancel-in-progress: false
 
 jobs:
-  test-story-finder:
+  discover-stories:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      # Repository ထဲက ဖိုင်တွေကို ယူမယ်
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Python တပ်ဆင်မယ်
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Story Finder ကို စမ်းသပ်မယ်
       - name: Run Story Finder
         env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+          GOOGLE_SPREADSHEET_ID: ${{ vars.GOOGLE_SPREADSHEET_ID }}
         run: python src/story_finder.py

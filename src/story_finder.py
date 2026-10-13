@@ -1,37 +1,46 @@
 # PyonPyin AI Agent
-# Standard Ebooks မှ စာအုပ်အသစ်ရှာပြီး Google Sheets ချိတ်ဆက်မှု စမ်းသပ်ခြင်း
+# Story discovery and source review workflow for a low-cost Myanmar story pipeline.
 
 import json
 import os
+import ipaddress
+import socket
+import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
 from pathlib import Path
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from pyonpyin.core import (
+    candidate_category,
+    normalize_url as normalize_source_url,
+    safe_story_theme,
+    stable_story_id,
+)
+from pyonpyin.sheets import SheetsStore, retry_transient
 
-
-# Repository ရဲ့ အခြေခံလမ်းကြောင်းကို ရှာမယ်
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Source စာရင်းရှိတဲ့ JSON ဖိုင်
 SOURCES_FILE = BASE_DIR / "data" / "approved_sources.json"
-
-# Google Sheets API အတွက် လိုအပ်တဲ့ ခွင့်ပြုချက်
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-
-# Google Sheet ID
-SPREADSHEET_ID = "1qTC6NH6HM4sIo6XT-C4fffaVK1eQ44MGL6fARQ07uI4"
-
-# စမ်းသပ်ဖတ်ရှုမယ့် Sheet အမည်နှင့် Range
-SHEET_RANGE = "SourceQueue!A1:E1"
+SPREADSHEET_ID = os.environ.get(
+    "GOOGLE_SPREADSHEET_ID",
+    "",
+)
 
 
-def load_approved_sources():
-    """အတည်ပြုပြီး Automation ခွင့်ပြုထားတဲ့ Source တွေကိုသာ ရွေးမယ်။"""
+def normalize_url(raw_url):
+    """Compatibility wrapper retained for callers of the existing Story Finder."""
+    return normalize_source_url(raw_url)
 
-    with SOURCES_FILE.open("r", encoding="utf-8") as file:
+
+def load_approved_sources(source_file=SOURCES_FILE):
+    """Return only approved sources that are allowed to be automated."""
+    with source_file.open("r", encoding="utf-8") as file:
         sources = json.load(file)
+    if not isinstance(sources, list) or any(not isinstance(source, dict) for source in sources):
+        raise ValueError("approved_sources.json must contain a list of source objects.")
 
     return [
         source for source in sources
@@ -41,117 +50,462 @@ def load_approved_sources():
 
 
 def connect_google_sheets():
-    """GitHub Secret ထဲက OAuth Token ကို အသုံးပြုပြီး Sheets API ချိတ်မယ်။"""
+    """Return a Sheets API client using the configured OAuth or service account."""
+    return SheetsStore().service
 
-    token_json = os.environ.get("GOOGLE_TOKEN_JSON")
 
-    if not token_json:
-        raise RuntimeError(
-            "GOOGLE_TOKEN_JSON Secret မတွေ့ပါ။ "
-            "GitHub Repository Settings ကို စစ်ဆေးပါ။"
-        )
+class _PlainTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
 
-    # Token အချက်အလက်ကို Environment Variable ကနေ ဖတ်မယ်
-    token_info = json.loads(token_json)
+    def handle_data(self, data):
+        self.parts.append(data)
 
-    credentials = Credentials.from_authorized_user_info(
-        token_info,
-        scopes=SCOPES
+
+def _extract_text(value):
+    parser = _PlainTextExtractor()
+    parser.feed(value)
+    return " ".join(" ".join(parser.parts).split())
+
+
+def verified_public_domain_policy(source):
+    policy = source.get("rights_policy", {})
+    has_review_details = isinstance(policy, dict) and all(
+        isinstance(policy.get(field), str) and policy[field].strip()
+        for field in ("evidence", "jurisdiction", "reviewer")
     )
+    if not (
+        source.get("approval_status") == "APPROVED"
+        and source.get("automation_allowed") is True
+        and isinstance(policy, dict)
+        and policy.get("mode") == "VERIFIED_PUBLIC_DOMAIN"
+        and policy.get("all_works_verified") is True
+        and has_review_details
+        and policy.get("translation_permission") == "YES"
+        and policy.get("ai_processing_permission") == "YES"
+    ):
+        return None
+    return policy
 
-    # Google Sheets API Service တည်ဆောက်မယ်
-    service = build(
-        "sheets",
-        "v4",
-        credentials=credentials,
-        cache_discovery=False
+
+def _fetch_verified_text(text_url, feed_host):
+    try:
+        parsed = urlsplit(text_url)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.hostname.lower() != feed_host.lower()
+    ):
+        return ""
+    try:
+        addresses = {
+            ipaddress.ip_address(result[4][0])
+            for result in socket.getaddrinfo(parsed.hostname, None)
+        }
+    except (OSError, ValueError):
+        return ""
+    if not addresses or any(not address.is_global for address in addresses):
+        return ""
+    try:
+        with urllib.request.urlopen(text_url, timeout=20) as response:
+            final_url = urlsplit(response.geturl())
+            if (
+                final_url.scheme.lower() != "https"
+                or not final_url.hostname
+                or final_url.hostname.lower() != parsed.hostname.lower()
+            ):
+                return ""
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "text/plain" not in content_type and "application/octet-stream" not in content_type:
+                return ""
+            content = response.read(800_001)
+    except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+        return ""
+    if len(content) > 800_000:
+        return ""
+    return _extract_text(content.decode("utf-8-sig", errors="replace"))
+
+
+def fetch_new_books(feed_url, max_items=None, source_configuration=None):
+    """Read a source Atom or RSS feed and return discovered book candidates."""
+    include_source_text = (
+        source_configuration is not None
+        and verified_public_domain_policy(source_configuration) is not None
     )
+    if not feed_url:
+        return []
+    try:
+        parsed_feed = urlsplit(feed_url)
+    except ValueError:
+        print("Skipping feed: the configured URL is malformed.")
+        return []
+    if (
+        parsed_feed.scheme.lower() != "https"
+        or not parsed_feed.hostname
+        or parsed_feed.username
+        or parsed_feed.password
+    ):
+        print("Skipping feed: only public HTTPS feed URLs are allowed.")
+        return []
+    try:
+        addresses = {
+            ipaddress.ip_address(result[4][0])
+            for result in socket.getaddrinfo(parsed_feed.hostname, None)
+        }
+    except (OSError, ValueError) as exc:
+        print(f"Unable to resolve approved feed host: {type(exc).__name__}")
+        return []
+    if not addresses or any(not address.is_global for address in addresses):
+        print("Skipping feed: feed host does not resolve exclusively to public addresses.")
+        return []
 
-    return service
+    request = urllib.request.Request(
+        feed_url,
+        headers={"User-Agent": "PyonPyinAgent/1.0"},
+    )
+    xml_data = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                final_url = urlsplit(response.geturl())
+                if final_url.scheme.lower() != "https" or not final_url.hostname:
+                    print("Skipping feed response: HTTPS redirects are required.")
+                    return []
+                if final_url.hostname.lower() != parsed_feed.hostname.lower():
+                    print("Skipping feed response: redirects to a different host are not allowed.")
+                    return []
+                xml_data = response.read(5 * 1024 * 1024 + 1)
+                if len(xml_data) > 5 * 1024 * 1024:
+                    print("Skipping feed: response exceeds the 5 MiB safety limit.")
+                    return []
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
+                print(f"Unable to fetch feed; HTTP {exc.code}.")
+                return []
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            if attempt == 2:
+                print(f"Unable to fetch feed: {type(exc).__name__}")
+                return []
+        time.sleep(2 ** attempt)
+    if xml_data is None:
+        return []
 
+    try:
+        root = ET.fromstring(xml_data)
+    except ET.ParseError as exc:
+        print(f"Unable to parse feed {feed_url}: {exc}")
+        return []
 
-def save_books_to_sheet(service, books, source_name):
-    """စာအုပ်စာရင်းကို SourceQueue ထဲ သိမ်းမယ်။"""
-
-    # လက်ရှိစာရင်းကို ဖတ်ပြီး ထပ်နေတဲ့ URL တွေကို စစ်မယ်
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range="SourceQueue!A2:E"
-    ).execute()
-
-    existing_rows = result.get("values", [])
-
-    # ရှိပြီးသား Source URL တွေကို Set ထဲထည့်မယ်
-    existing_urls = {
-        row[1]
-        for row in existing_rows
-        if len(row) > 1 and row[1]
+    namespaces = {
+        "atom": "http://www.w3.org/2005/Atom",
     }
+    xml_language = root.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "")
+    rss_language = root.findtext("./channel/language", "")
+    feed_language = xml_language or rss_language or "UNKNOWN"
 
-    new_rows = []
+    entries = root.findall(".//atom:entry", namespaces)
+    if not entries:
+        entries = root.findall(".//item")
+
+    books = []
+    for entry in entries:
+        title = "Untitled"
+        url = ""
+        source_identifier = ""
+        author = ""
+        published_at = ""
+        category = ""
+        license_url = ""
+        item_language = ""
+        source_text = ""
+        text_url = ""
+
+        if entry.tag.endswith("entry"):
+            title_element = entry.find("atom:title", namespaces)
+            link_element = None
+            for candidate in entry.findall("atom:link", namespaces):
+                relation = candidate.attrib.get("rel", "alternate")
+                if not candidate.attrib.get("href"):
+                    continue
+                if relation == "license":
+                    license_url = candidate.attrib["href"]
+                elif (
+                    relation == "alternate"
+                    and candidate.attrib.get("type", "").lower() != "text/plain"
+                    and link_element is None
+                ):
+                    link_element = candidate
+                if (
+                    include_source_text
+                    and candidate.attrib.get("type", "").lower() == "text/plain"
+                    and relation in {"alternate", "enclosure"}
+                ):
+                    text_url = candidate.attrib["href"]
+            if title_element is not None:
+                title = title_element.text or title
+            if link_element is not None:
+                url = link_element.attrib.get("href", "")
+            identifier_element = entry.find("atom:id", namespaces)
+            author_element = entry.find("atom:author/atom:name", namespaces)
+            published_element = entry.find("atom:published", namespaces)
+            category_element = entry.find("atom:category", namespaces)
+            content_element = entry.find("atom:content", namespaces)
+            if include_source_text and content_element is not None:
+                source_text = _extract_text("".join(content_element.itertext()))
+            item_language = entry.attrib.get(
+                "{http://www.w3.org/XML/1998/namespace}lang", ""
+            )
+            source_identifier = (
+                identifier_element.text if identifier_element is not None else ""
+            ) or ""
+            author = (author_element.text if author_element is not None else "") or ""
+            published_at = (
+                published_element.text if published_element is not None else ""
+            ) or ""
+            category = (
+                category_element.attrib.get("term", "")
+                if category_element is not None else ""
+            )
+        else:
+            title_element = entry.find("title")
+            link_element = entry.find("link")
+            if title_element is not None:
+                title = title_element.text or title
+            if link_element is not None:
+                url = link_element.text or link_element.attrib.get("href", "")
+            identifier_element = entry.find("guid")
+            author_element = entry.find("author")
+            published_element = entry.find("pubDate")
+            category_element = entry.find("category")
+            license_element = entry.find("license")
+            content_element = entry.find(
+                "{http://purl.org/rss/1.0/modules/content/}encoded"
+            )
+            enclosure_element = entry.find("enclosure")
+            if include_source_text and content_element is not None:
+                source_text = _extract_text("".join(content_element.itertext()))
+            if (
+                include_source_text
+                and enclosure_element is not None
+                and enclosure_element.attrib.get("type", "").lower() == "text/plain"
+            ):
+                text_url = enclosure_element.attrib.get("url", "")
+            source_identifier = (
+                identifier_element.text if identifier_element is not None else ""
+            ) or ""
+            author = (author_element.text if author_element is not None else "") or ""
+            published_at = (
+                published_element.text if published_element is not None else ""
+            ) or ""
+            category = (category_element.text if category_element is not None else "") or ""
+            license_url = (license_element.text if license_element is not None else "") or ""
+
+        if not url:
+            continue
+        if include_source_text and not source_text and text_url:
+            source_text = _fetch_verified_text(text_url, parsed_feed.hostname)
+
+        book = {
+            "title": title.strip() or "Untitled",
+            "url": url.strip(),
+            "source_url": url.strip(),
+            "source_id": source_identifier.strip(),
+            "author": author.strip(),
+            "published_at": published_at.strip(),
+            "source_category_raw": category.strip(),
+            "category": candidate_category(category),
+            "source_language": item_language or feed_language,
+            "license_url": normalize_url(license_url),
+            "license_status": "NEEDS_LICENSE_REVIEW",
+            "rights_cleared": "NO",
+            "status": "NEEDS_LICENSE_REVIEW",
+        }
+        if include_source_text and source_text:
+            book["source_text"] = source_text
+        books.append(book)
+
+        if max_items and len(books) >= max_items:
+            break
+
+    return books
+
+
+def remove_duplicate_books(books):
+    """Remove duplicate stories by normalizing their original URLs."""
+    unique_books = []
+    seen_urls = set()
 
     for book in books:
-        url = book.get("url", "").strip()
-
-        # URL မရှိရင်၊ ရှိပြီးသား URL ဖြစ်ရင် ကျော်မယ်
-        if not url or url in existing_urls:
+        book_url = normalize_url(book.get("url") or book.get("source_url"))
+        if not book_url or book_url in seen_urls:
             continue
 
-        new_rows.append([
-            book.get("title", "Untitled"),
-            url,
-            source_name,
-            "NEEDS_LICENSE_REVIEW",
-            "PENDING_REVIEW"
-        ])
+        seen_urls.add(book_url)
+        unique_books.append(book)
 
-        # ဒီတစ်ကြိမ်အတွင်း ထပ်နေမှုကိုလည်း ကာကွယ်မယ်
-        existing_urls.add(url)
+    print(f"Books after duplicate check: {len(unique_books)}")
+    return unique_books
 
-    if not new_rows:
-        print("New books to save: 0")
-        return
 
-    # စာအုပ်အသစ်တွေကို Sheet ရဲ့ အောက်ဆုံးမှာ ထည့်မယ်
-    service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range="SourceQueue!A:E",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": new_rows}
-    ).execute()
+def cap_candidates_per_category(books, child_limit=5, adult_limit=5, unclassified_limit=5):
+    """Keep independent per-cycle caps without guessing unknown age categories."""
+    limits = {
+        "CHILDREN": child_limit,
+        "ADULT": adult_limit,
+        "UNCLASSIFIED": unclassified_limit,
+    }
+    counts = {category: 0 for category in limits}
+    selected = []
+    for book in books:
+        category = candidate_category(book.get("category"))
+        if counts[category] >= limits[category]:
+            continue
+        book["category"] = category
+        selected.append(book)
+        counts[category] += 1
+    print(
+        "Discovery candidates: "
+        f"children={counts['CHILDREN']}, adults={counts['ADULT']}, "
+        f"unclassified={counts['UNCLASSIFIED']}"
+    )
+    return selected
 
-    print(f"New books saved: {len(new_rows)}")
+
+def create_library_record(book, source):
+    source_name = source.get("source_name", "Unknown")
+    source_url = book.get("source_url") or book.get("url", "")
+    source_id = book.get("source_id") or normalize_url(source_url)
+    category = candidate_category(book.get("category"))
+    policy = verified_public_domain_policy(source)
+    verified_public_domain = policy is not None
+    record = {
+        "story_id": stable_story_id(source_name, source_id, source_url),
+        "original_title": book.get("title", "Untitled"),
+        "author": book.get("author", ""),
+        "source_id": source_id,
+        "source_name": source_name,
+        "source_url": source_url,
+        "source_language": book.get("source_language", ""),
+        "category": category,
+        "discovered_at": datetime.now(timezone.utc).isoformat(),
+        "duplicate_status": "UNIQUE",
+        "source_license_rule": source.get("license_rule", "Verify each work"),
+        "category_evidence": book.get("category_evidence", ""),
+        "license_name": book.get("license_name", ""),
+        "license_url": book.get("license_url", ""),
+        "license_evidence": (
+            str(policy["evidence"]).strip() if verified_public_domain
+            else book.get("license_evidence", "")
+        ),
+        "license_status": "APPROVED" if verified_public_domain else "NEEDS_LICENSE_REVIEW",
+        "rights_cleared": "YES" if verified_public_domain else "NO",
+        "rights_jurisdiction": (
+            str(policy["jurisdiction"]).strip() if verified_public_domain else ""
+        ),
+        "permission_for_translation": "YES" if verified_public_domain else "NO",
+        "permission_for_ai_processing": "YES" if verified_public_domain else "NO",
+        "permission_for_publication": "NO",
+        "human_reviewer": (
+            str(policy["reviewer"]).strip() if verified_public_domain else ""
+        ),
+        "review_status": (
+            "SOURCE_POLICY_VERIFIED" if verified_public_domain else "PENDING_REVIEW"
+        ),
+        "discovery_error": "",
+        "rights_mode": "VERIFIED_PUBLIC_DOMAIN" if verified_public_domain else "UNKNOWN",
+        "broad_theme": safe_story_theme(
+            category, source.get("broad_theme", book.get("broad_theme", ""))
+        ),
+        "source_text": book.get("source_text", "") if verified_public_domain else "",
+    }
+    return record
+
+
+def queue_automatic_draft(store, record, existing_production):
+    """Queue one safe draft per discovered story without overwriting existing work."""
+    story_id = record.get("story_id", "")
+    if not story_id or any(row.get("story_id") == story_id for row in existing_production):
+        return False
+    category = candidate_category(record.get("category"))
+    if (
+        category not in {"CHILDREN", "ADULT"}
+        or not str(record.get("category_evidence", "") or "").strip()
+    ):
+        return False
+
+    if record.get("rights_mode") == "VERIFIED_PUBLIC_DOMAIN":
+        source_text = record.get("source_text", "")
+        source_text_length = len(source_text) if isinstance(source_text, str) else 0
+        try:
+            source_segments = int(record.get("source_text_segment_count", "0") or 0)
+        except (TypeError, ValueError):
+            source_segments = 0
+        has_bounded_source_text = (
+            0 < source_text_length <= 200_000
+            or source_text_length == 0 and 0 < source_segments <= 5
+        )
+        if not (
+            record.get("license_status") == "APPROVED"
+            and record.get("rights_cleared") == "YES"
+            and str(record.get("license_evidence", "") or "").strip()
+            and str(record.get("human_reviewer", "") or "").strip()
+            and str(record.get("rights_jurisdiction", "") or "").strip()
+            and record.get("permission_for_translation") == "YES"
+            and record.get("permission_for_ai_processing") == "YES"
+            and has_bounded_source_text
+        ):
+            return False
+        draft_mode = "PUBLIC_DOMAIN_RETELLING"
+    else:
+        if not safe_story_theme(category, record.get("broad_theme", "")):
+            return False
+        draft_mode = "ORIGINAL_THEME"
+
+    store.write_production({
+        "story_id": story_id,
+        "draft_mode": draft_mode,
+        "processing_status": "QUEUED",
+        "content_review_status": "PENDING",
+        "approval_status": "",
+        "processing_error": "",
+        "audio_required": "YES",
+    })
+    return True
+
+
 def get_license_approved_books(service):
-    """လူကိုယ်တိုင် စစ်ဆေးထားသော စာအုပ်များကို စစ်ထုတ်မယ်။"""
+    """Read the source queue and return rows that are human-approved for licensing."""
+    if service is None:
+        return []
 
-    # A-K ကော်လံအထိ ဖတ်မယ်
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range="SourceQueue!A2:K"
-    ).execute()
+    try:
+        result = retry_transient(lambda: service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="SourceQueue!A2:K",
+        ).execute())
+    except Exception as exc:  # pragma: no cover - depends on Google API availability.
+        raise RuntimeError("Unable to read approved books from Google Sheets.") from exc
 
-    rows = result.get("values", [])
     approved_books = []
-
-    for row in rows:
-        # ကော်လံ ၁၁ ခု ပြည့်စုံအောင် အလွတ်နေရာတွေ ဖြည့်မယ်
-        row = row + [""] * (11 - len(row))
-
+    for row in result.get("values", []):
+        row = row + [""] * max(0, 11 - len(row))
         title = row[0].strip()
         source_url = row[1].strip()
         source_name = row[2].strip()
         license_status = row[3].strip().upper()
         license_evidence = row[5].strip()
         human_reviewer = row[6].strip()
-
-        # H-K ကော်လံများမှ License Review အချက်အလက်တွေ ဖတ်မယ်
         original_copyright = row[7].strip().upper()
         translation_copyright = row[8].strip().upper()
         thailand_rights_checked = row[9].strip().upper()
         myanmar_translation_rights = row[10].strip().upper()
 
-        # လိုအပ်တဲ့ အချက်အလက်အားလုံး ပြည့်စုံမှ ရွေးချယ်မယ်
         if (
             title
             and source_url
@@ -176,165 +530,262 @@ def get_license_approved_books(service):
                 "myanmar_translation_rights": myanmar_translation_rights,
             })
 
-    print(
-        "Human-reviewed, license-approved books: "
-        f"{len(approved_books)}"
-    )
-
+    print(f"Human-reviewed, license-approved books: {len(approved_books)}")
     return approved_books
 
-def fetch_new_books(feed_url):
-    """Atom feed မှ စာအုပ်စာရင်းကို ရယူမယ်။"""
 
-    request = urllib.request.Request(
-        feed_url,
-        headers={"User-Agent": "PyonPyinAgent/1.0"}
-    )
-
-    with urllib.request.urlopen(request, timeout=20) as response:
-        xml_data = response.read()
-
-    root = ET.fromstring(xml_data)
-
-    namespace = {"atom": "http://www.w3.org/2005/Atom"}
-    books = []
-
-    for entry in root.findall("atom:entry", namespace):
-        title_element = entry.find("atom:title", namespace)
-        link_element = entry.find("atom:link", namespace)
-
-        if title_element is None or link_element is None:
-            continue
-
-        books.append({
-            "title": title_element.text or "Untitled",
-            "url": link_element.attrib.get("href", ""),
-            "status": "NEEDS_LICENSE_REVIEW"
-        })
-
-    return books
-def remove_duplicate_books(books):
-    """URL တူညီတဲ့ စာအုပ်တွေကို တစ်အုပ်တည်းသာ ထားမယ်။"""
-
-    unique_books = []
-    seen_urls = set()
-
-    for book in books:
-        # URL ကို ဖတ်ပြီး အပို Space တွေ ဖယ်ရှားမယ်
-        book_url = book.get("url", "").strip().rstrip("/")
-
-        # URL မရှိရင် ကျော်မယ်
-        if not book_url:
-            continue
-
-        # URL တူပြီးသားဆိုရင် ထပ်မထည့်ဘူး
-        if book_url in seen_urls:
-            continue
-
-        seen_urls.add(book_url)
-        unique_books.append(book)
-
-    print(f"Books after duplicate check: {len(unique_books)}")
-
-    return unique_books
 def filter_existing_books(service, books):
-    """Google Sheets ထဲမှာ ရှိပြီးသားစာအုပ်တွေကို ဖယ်ရှားမယ်။"""
-
-    # SourceQueue ထဲက ရှိပြီးသား URL တွေကို ဖတ်မယ်
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range="SourceQueue!A2:G"
-    ).execute()
-
-    rows = result.get("values", [])
-    print(f"Existing rows read from Google Sheets:{len(rows)}")
-
-    # ရှိပြီးသား URL တွေကို Set ထဲမှာ သိမ်းမယ်
-    existing_urls = set()
-
-    for row in rows:
-        if len(row) > 1 and row[1].strip():
-            existing_urls.add(row[1].strip().rstrip("/"))
-
-    # Sheet ထဲမှာ မရှိသေးတဲ့စာအုပ်တွေကိုသာ ရွေးမယ်
-    new_books = []
-
-    for book in books:
-        url = book.get("url", "").strip().rstrip("/")
-
-        if url and url not in existing_urls:
-            new_books.append(book)
-
-    print(f"New books not in Google Sheets: {len(new_books)}")
-
-    return new_books
-def main():
-    """PyonPyin AI Agent ရဲ့ အဓိကလုပ်ဆောင်ချက်။"""
+    """Filter books already present in the source queue, if Google Sheets is available."""
+    if service is None:
+        return list(books)
 
     try:
-        # အဆင့် ၁: Google Sheets ကို ချိတ်ဆက်မယ်
-        print("Connecting to Google Sheets...")
-        service = connect_google_sheets()
+        result = retry_transient(lambda: service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="SourceQueue!A2:G",
+        ).execute())
+    except Exception as exc:  # pragma: no cover - depends on API availability.
+        raise RuntimeError("Unable to read existing Google Sheets rows.") from exc
 
-        # အဆင့် ၂: လိုင်စင်အတည်ပြုထားတဲ့စာအုပ်တွေကို ဖတ်မယ်
-        approved_books = get_license_approved_books(service)
+    existing_urls = set()
+    for row in result.get("values", []):
+        if len(row) > 1 and row[1].strip():
+            existing_urls.add(normalize_url(row[1]))
 
-        print(
-            f"License-approved books: {len(approved_books)}"
+    filtered_books = []
+    for book in books:
+        url = normalize_url(book.get("url") or book.get("source_url"))
+        if url and url not in existing_urls:
+            filtered_books.append(book)
+
+    print(f"New books not in Google Sheets: {len(filtered_books)}")
+    return filtered_books
+
+
+def existing_source_queue_urls(service):
+    try:
+        result = retry_transient(lambda: service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="SourceQueue!A2:G",
+        ).execute())
+    except Exception as exc:  # pragma: no cover - depends on Google API availability.
+        raise RuntimeError("Unable to read existing source queue URLs.") from exc
+    return {
+        normalize_url(row[1])
+        for row in result.get("values", [])
+        if len(row) > 1 and row[1].strip()
+    }
+
+
+def save_books_to_sheet(service, books, source_name):
+    """Append new discovered books to the source queue sheet."""
+    if service is None or not books:
+        return 0
+
+    try:
+        result = retry_transient(lambda: service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="SourceQueue!A2:E",
+        ).execute())
+        existing_rows = result.get("values", [])
+    except Exception as exc:  # pragma: no cover - depends on API availability.
+        raise RuntimeError("Unable to read Google Sheets before appending candidates.") from exc
+
+    existing_urls = {
+        normalize_url(row[1])
+        for row in existing_rows
+        if len(row) > 1 and row[1].strip()
+    }
+
+    new_rows = []
+    for book in books:
+        url = normalize_url(book.get("url") or book.get("source_url"))
+        if not url or url in existing_urls:
+            continue
+
+        new_rows.append([
+            book.get("title", "Untitled"),
+            url,
+            source_name,
+            "NEEDS_LICENSE_REVIEW",
+            "PENDING_REVIEW",
+        ])
+        existing_urls.add(url)
+
+    if not new_rows:
+        print("New books to save: 0")
+        return 0
+
+    retry_transient(lambda: service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range="SourceQueue!A:E",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": new_rows},
+    ).execute())
+
+    print(f"New books saved: {len(new_rows)}")
+    return len(new_rows)
+
+
+def main():
+    """Run the story discovery cycle in dry-run mode when Google credentials are absent."""
+    store = None
+    if (
+        os.environ.get("GOOGLE_SPREADSHEET_ID")
+        and (
+            os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+            or os.environ.get("GOOGLE_TOKEN_JSON")
+            or os.environ.get("GOOGLE_TOKEN_FILE")
         )
+    ):
+        print("Connecting to Google Sheets...")
+        store = SheetsStore()
+        store.ensure_schema()
+    else:
+        print("Proceeding with dry-run mode; no Google Sheets updates will be written.")
 
-        # အဆင့် ၃: အတည်ပြုထားတဲ့စာအုပ်စာရင်းကို ပြမယ်
-        for book in approved_books:
-            print(f"Approved title: {book['title']}")
-            print(f"Source URL: {book['source_url']}")
-            print(f"Reviewed by: {book['human_reviewer']}")
+    approved_sources = load_approved_sources()
+    if not approved_sources:
+        print("No approved sources are configured for automation.")
+        return 0
 
-        # အဆင့် ၄: Source စာရင်းကို ဖတ်မယ်
-        sources = load_approved_sources()
+    library_records = list(store.read_records("Story Library")) if store is not None else []
+    known_ids = {row.get("story_id", "") for row in library_records}
+    known_urls = {
+        normalize_url(row.get("source_url", ""))
+        for row in library_records
+        if row.get("source_url")
+    }
+    legacy_urls = existing_source_queue_urls(store.service) if store is not None else set()
+    discovered = []
+    for source in approved_sources:
+        feed_url = source.get("feed_url")
+        if not feed_url:
+            print(f"Skipping source without feed_url: {source.get('source_name')}")
+            continue
 
-        for source in sources:
-            feed_url = source.get("feed_url")
-
-            # Feed URL မရှိရင် ကျော်မယ်
-            if not feed_url:
-                continue
-
-            print(f"\nChecking source: {source['source_name']}")
-
-            # အဆင့် ၅: စာအုပ်အသစ်တွေကို ရှာမယ်
-            books = fetch_new_books(feed_url)
-            print(f"Books found: {len(books)}")
-
-            # အဆင့် ၆: ထပ်နေတဲ့စာအုပ်တွေကို ဖယ်မယ်
-            books = remove_duplicate_books(books)
-
-            # အဆင့် ၇: ရှိပြီးသားစာအုပ်တွေကို ဖယ်မယ်
-            new_books = filter_existing_books(service, books)
-
-            print(f"New books ready for review: {len(new_books)}")
-
-            # အဆင့် ၈: စာအုပ်အသစ်တွေကို Google Sheets ထဲ သိမ်းမယ်
-            if new_books:
-                save_books_to_sheet(
-                    service,
-                    new_books,
-                    source["source_name"]
+        print(f"\nChecking source: {source.get('source_name')}")
+        books = fetch_new_books(
+            feed_url,
+            max_items=15 if verified_public_domain_policy(source) else None,
+            source_configuration=source,
+        )
+        print(f"Books found: {len(books)}")
+        for book in remove_duplicate_books(books):
+            raw_category = book.pop("source_category_raw", "")
+            if source.get("source_language"):
+                book["source_language"] = source["source_language"]
+            mapping = source.get("category_mapping", {})
+            if not isinstance(mapping, dict):
+                raise ValueError(
+                    f"category_mapping for {source.get('source_name')} must be an object."
                 )
-
-                print(f"Saved {len(new_books)} new books.")
+            category_mapping = {
+                str(key).casefold(): candidate_category(value)
+                for key, value in mapping.items()
+            }
+            mapped_category = category_mapping.get(raw_category.casefold())
+            feed_category = candidate_category(raw_category)
+            configured_category = source.get("default_category")
+            if mapped_category:
+                book["category"] = mapped_category
+                book["category_evidence"] = f"Configured feed category mapping: {raw_category}"
+            elif feed_category in {"CHILDREN", "ADULT"}:
+                book["category"] = feed_category
+                book["category_evidence"] = f"Explicit feed audience category: {raw_category}"
+            elif configured_category in {"CHILDREN", "ADULT"}:
+                book["category"] = configured_category
+                book["category_evidence"] = "Human-approved source default category"
             else:
-                print("No new books to save.")
+                book["category"] = "UNCLASSIFIED"
+                book["category_evidence"] = (
+                    f"Unmapped feed category: {raw_category}" if raw_category
+                    else "No source age-category evidence"
+                )
+            book["broad_theme"] = safe_story_theme(
+                book["category"],
+                raw_category or source.get("broad_theme", ""),
+            )
+            book["_source"] = source
+            discovered.append(book)
 
-        print("\nStory Finder completed successfully.")
-        print("License review is required for unapproved books.")
-        print("AI story generation has not started.")
-        print("Auto publishing remains disabled.")
+    fresh = []
+    seen_ids = set()
+    seen_urls = set()
+    legacy_backfills = {}
+    for book in discovered:
+        source = book["_source"]
+        record = create_library_record(book, source)
+        url = normalize_url(record["source_url"])
+        if record["story_id"] in seen_ids or url in seen_urls:
+            continue
+        seen_ids.add(record["story_id"])
+        seen_urls.add(url)
+        if record["story_id"] in known_ids or url in known_urls:
+            if (
+                store is not None
+                and record["story_id"] in known_ids
+                and url not in legacy_urls
+            ):
+                legacy_backfills.setdefault(source.get("source_name", "Unknown"), []).append(book)
+            continue
+        fresh.append((book, source, record, url in legacy_urls))
 
-    except Exception as error:
-        # Error အမျိုးအစားကိုသာ ပြမယ်၊ Secret တွေကို မထုတ်ပြဘူး
-        print(f"Story Finder failed: {type(error).__name__}")
-        raise
+    candidates = cap_candidates_per_category(
+        [record for _, _, record, _ in fresh]
+    )
+    candidate_ids = {record["story_id"] for record in candidates}
+    new_candidates = [item for item in fresh if item[2]["story_id"] in candidate_ids]
+
+    print(f"New candidates selected: {len(new_candidates)}")
+    existing_production = (
+        list(store.read_records("Story Production")) if store is not None else []
+    )
+    legacy_additions = dict(legacy_backfills)
+    library_saved = 0
+    drafts_queued = 0
+    for book, source, record, already_in_legacy in new_candidates:
+        if store is None:
+            print(
+                f"- [{record['category']}] {record['original_title']} "
+                f"({record['story_id']}) -> {record['source_url']}"
+            )
+            continue
+        store.upsert_story(record)
+        library_saved += 1
+        if queue_automatic_draft(store, record, existing_production):
+            existing_production.append({
+                "story_id": record["story_id"],
+                "processing_status": "QUEUED",
+            })
+            drafts_queued += 1
+        if not already_in_legacy:
+            legacy_additions.setdefault(source.get("source_name", "Unknown"), []).append(book)
+
+    print(f"Story Library candidates saved: {library_saved}")
+    if store is not None:
+        for existing_record in library_records:
+            if queue_automatic_draft(store, existing_record, existing_production):
+                existing_production.append({
+                    "story_id": existing_record.get("story_id", ""),
+                    "processing_status": "QUEUED",
+                })
+                drafts_queued += 1
+    print(f"Automatic safe drafts queued: {drafts_queued}")
+    if store is not None:
+        legacy_saved = 0
+        for source_name, books in legacy_additions.items():
+            legacy_saved += save_books_to_sheet(store.service, books, source_name)
+        print(f"Legacy SourceQueue entries saved: {legacy_saved}")
+
+    print("\nStory Finder completed successfully.")
+    print("Unknown-rights text is never forwarded to Gemini.")
+    print("Unclassified feed entries are saved but not queued.")
+    print("Gemini generation runs separately and is opt-in.")
+    print("Auto publishing remains disabled.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

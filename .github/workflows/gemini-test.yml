@@ -1,25 +1,39 @@
-name: PyonPyin Story Writer Test
+name: PyonPyin Tests and Optional Gemini Smoke Test
 
-on: [workflow_dispatch]
+on:
+  workflow_dispatch:
+    inputs:
+      run_live_api_test:
+        description: "Make one live Gemini API request (may use quota or incur charges)"
+        required: true
+        type: boolean
+        default: false
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  test-gemini:
+  tests:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
-      - name: Generate Myanmar Story
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run offline workflow and safety tests
         env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Run optional live Gemini smoke test
+        if: github.event_name == 'workflow_dispatch' && inputs.run_live_api_test
+        env:
+          PYTHONPATH: src
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          curl -s \
-            -X POST \
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
-            -H "x-goog-api-key: ${GEMINI_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "contents": [{
-                "parts": [{
-                  "text": "You are PyonPyin Story Writer.\n\nYour job is to adapt an approved source story into a clear, natural and engaging Myanmar-language story.\n\nRules:\n1. Use only the source story provided.\n2. Do not invent important facts that are not in the source.\n3. Write in natural, easy-to-understand Myanmar language.\n4. Keep the main meaning and important events of the original story.\n5. Do not copy the source text word-for-word.\n6. Create a short title.\n7. Create 3 simple quiz questions with answers.\n8. Create 1 short reflection question.\n9. Do not include copyrighted text verbatim.\n10. Return ONLY valid JSON.\n\nRequired JSON format:\n{\n  \"title\": \"...\",\n  \"story\": \"...\",\n  \"quiz\": [\n    {\"question\": \"...\", \"answer\": \"...\"},\n    {\"question\": \"...\", \"answer\": \"...\"},\n    {\"question\": \"...\", \"answer\": \"...\"}\n  ],\n  \"reflection\": \"...\"\n}\n\nSource story:\nOnce there was a thirsty crow. It found a pot with a little water inside. The crow dropped small stones into the pot until the water rose high enough to drink.\n\nReturn only the JSON result."
-                }]
-              }]
-            }'
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+        run: python scripts/gemini_smoke_test.py
