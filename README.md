@@ -198,12 +198,14 @@ $env:GEMINI_API_KEY = "your-key-from-a-secure-secret-store"
 python src\process_stories.py
 ```
 
-The processor reads `QUEUED` rows, processes no more than one per run, and
-rechecks policy. Unknown rights use an independent theme-only prompt that
-excludes the discovered title and source text. Verified public-domain mode
-requires the policy below and feed-provided text. It saves errors/drafts and
-does not publish. Audio remains pending until the TTS setup step above is
-complete.
+The processor first queues eligible `Story Library` records that have no
+existing `Story Production` row, then processes no more than one queued draft
+per run and rechecks policy. Queueing requires explicit audience-category
+evidence; unclassified records remain untouched. Unknown rights use an
+independent theme-only prompt that excludes the discovered title and source
+text. Verified public-domain mode requires the policy below and feed-provided
+text. It saves errors/drafts and does not publish. Audio remains pending until
+the TTS setup step above is complete.
 
 For local OAuth discovery and draft processing, set the same spreadsheet/token
 environment used by the dashboard, for example:

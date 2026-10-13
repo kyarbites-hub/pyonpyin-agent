@@ -8,16 +8,43 @@ import uuid
 from pyonpyin.core import eligible_candidate, safe_story_theme, utc_now
 from pyonpyin.gemini import GeminiClient
 from pyonpyin.sheets import SheetsStore
+from story_finder import queue_automatic_draft
 
 
 PROMPT_VERSION = "myanmar-originality-v2"
 
 
+def queue_eligible_stories(store, library_records, production_rows):
+    """Queue safe library records once, using the discovery eligibility policy."""
+    queued_count = 0
+    for story in library_records:
+        if queue_automatic_draft(store, story, production_rows):
+            production_rows.append({
+                "story_id": story["story_id"],
+                "draft_mode": (
+                    "PUBLIC_DOMAIN_RETELLING"
+                    if story.get("rights_mode") == "VERIFIED_PUBLIC_DOMAIN"
+                    else "ORIGINAL_THEME"
+                ),
+                "processing_status": "QUEUED",
+                "content_review_status": "PENDING",
+                "approval_status": "",
+                "processing_error": "",
+                "audio_required": "YES",
+            })
+            queued_count += 1
+    return queued_count
+
+
 def process_queued_stories(store, client=None, max_drafts=1):
     if max_drafts < 1:
         raise ValueError("max_drafts must be at least 1.")
-    library = {row.get("story_id"): row for row in store.read_records("Story Library")}
+    library_records = store.read_records("Story Library")
+    library = {row.get("story_id"): row for row in library_records}
     production_rows = store.read_records("Story Production")
+    queued_count = queue_eligible_stories(store, library_records, production_rows)
+    if queued_count:
+        print(f"Queued {queued_count} eligible Story Library record(s).")
     queued = [
         row for row in production_rows
         if row.get("processing_status", "").strip().upper() == "QUEUED"

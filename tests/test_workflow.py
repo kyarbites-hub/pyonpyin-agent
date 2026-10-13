@@ -18,7 +18,7 @@ from scripts.gemini_smoke_test import has_myanmar_text
 from pyonpyin.audio import AudioUnavailable, GoogleCloudTTS
 from pyonpyin.sheets import SheetsStore
 import process_stories
-from process_stories import process_queued_stories
+from process_stories import process_queued_stories, queue_eligible_stories
 import story_finder
 from story_finder import (
     cap_candidates_per_category,
@@ -684,36 +684,118 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(store.production["processing_status"], "BLOCKED_RIGHTS")
         self.assertEqual(store.history[0]["status"], "BLOCKED_RIGHTS")
 
+    def test_queue_eligible_library_records_uses_safe_policy_and_preserves_existing_rows(self):
+        verified_story = {
+            "story_id": "pp-verified",
+            "category": "ADULT",
+            "category_evidence": "Explicit feed audience category",
+            "rights_mode": "VERIFIED_PUBLIC_DOMAIN",
+            "license_status": "APPROVED",
+            "rights_cleared": "YES",
+            "license_evidence": "Verified work-level rights record",
+            "human_reviewer": "Reviewer",
+            "rights_jurisdiction": "Myanmar",
+            "permission_for_translation": "YES",
+            "permission_for_ai_processing": "YES",
+            "source_text": "Public-domain source text",
+        }
+        unknown_rights_story = {
+            "story_id": "pp-theme-queued",
+            "category": "CHILDREN",
+            "category_evidence": "Explicit feed audience category",
+            "rights_mode": "UNKNOWN",
+            "license_status": "UNKNOWN",
+            "rights_cleared": "NO",
+            "broad_theme": "friendship",
+            "original_title": "Must not be sent to Gemini",
+            "source_text": "Must not be sent to Gemini",
+        }
+        unclassified_story = {
+            "story_id": "pp-unclassified",
+            "category": "UNCLASSIFIED",
+            "category_evidence": "No source age-category evidence",
+            "rights_mode": "UNKNOWN",
+        }
+        existing_draft = {
+            "story_id": "pp-existing",
+            "processing_status": "DRAFT_READY",
+            "myanmar_title": "Keep this draft",
+        }
+
+        class FakeStore:
+            def __init__(self):
+                self.writes = []
+
+            def write_production(self, row):
+                self.writes.append(dict(row))
+
+        store = FakeStore()
+        production_rows = [existing_draft]
+        queued_count = queue_eligible_stories(
+            store,
+            [verified_story, unknown_rights_story, unclassified_story],
+            production_rows,
+        )
+
+        self.assertEqual(queued_count, 2)
+        self.assertEqual(
+            [(row["story_id"], row["draft_mode"]) for row in store.writes],
+            [
+                ("pp-verified", "PUBLIC_DOMAIN_RETELLING"),
+                ("pp-theme-queued", "ORIGINAL_THEME"),
+            ],
+        )
+        self.assertEqual(production_rows[0], existing_draft)
+        self.assertEqual(
+            [row["story_id"] for row in production_rows],
+            ["pp-existing", "pp-verified", "pp-theme-queued"],
+        )
+        self.assertEqual(store.writes[1]["approval_status"], "")
+        self.assertNotIn("pp-unclassified", [row["story_id"] for row in production_rows])
+
+        self.assertEqual(
+            queue_eligible_stories(
+                store,
+                [verified_story, unknown_rights_story, unclassified_story],
+                production_rows,
+            ),
+            0,
+        )
+        self.assertEqual(len(store.writes), 2)
+
     def test_pipeline_generates_original_theme_draft_without_reading_source_or_rights_clearance(self):
         story = {
             "story_id": "pp-theme",
             "category": "CHILDREN",
+            "category_evidence": "Explicit feed audience category",
             "original_title": "Do not pass this title to Gemini",
             "rights_mode": "UNKNOWN",
             "rights_cleared": "NO",
             "broad_theme": "friendship",
             "source_text": "Do not pass this source text to Gemini",
         }
-        production = {
-            "story_id": "pp-theme",
-            "draft_mode": "ORIGINAL_THEME",
-            "processing_status": "QUEUED",
-        }
 
         class FakeStore:
             def __init__(self):
-                self.production = dict(production)
+                self.production = []
                 self.history = []
                 self.episodes = []
 
             def read_records(self, sheet):
-                return [story] if sheet == "Story Library" else [self.production]
+                return [story] if sheet == "Story Library" else self.production
 
             def read_texts(self, _text_type):
                 self.fail("theme-only generation must not read the source text sheet")
 
             def write_production(self, row):
-                self.production.update(row)
+                existing = next(
+                    (item for item in self.production if item["story_id"] == row["story_id"]),
+                    None,
+                )
+                if existing:
+                    existing.update(row)
+                else:
+                    self.production.append(dict(row))
 
             def write_episodes(self, _story_id, episodes):
                 self.episodes = list(episodes)
@@ -742,9 +824,10 @@ class WorkflowTests(unittest.TestCase):
 
         store = FakeStore()
         self.assertEqual(process_queued_stories(store, FakeGemini()), 0)
-        self.assertEqual(store.production["processing_status"], "DRAFT_READY")
-        self.assertEqual(store.production["license_review_status"], "NOT_USED_THEME_ONLY")
-        self.assertEqual(store.production["quiz_json"], '[{"question": "မေးခွန်း", "answer": "အဖြေ"}]')
+        self.assertEqual(store.production[0]["processing_status"], "DRAFT_READY")
+        self.assertEqual(store.production[0]["draft_mode"], "ORIGINAL_THEME")
+        self.assertEqual(store.production[0]["license_review_status"], "NOT_USED_THEME_ONLY")
+        self.assertEqual(store.production[0]["quiz_json"], '[{"question": "မေးခွန်း", "answer": "အဖြေ"}]')
         self.assertEqual(len(store.episodes), 1)
 
     def test_processing_default_limit_is_one_draft_per_run(self):
