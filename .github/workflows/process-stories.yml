@@ -41,5 +41,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           PYONPYIN_GEMINI_AUTOMATION_ENABLED: ${{ vars.PYONPYIN_GEMINI_AUTOMATION_ENABLED }}
-          PYONPYIN_PUBLISHING_ENABLED: "false"
+          PYONPYIN_PUBLISHING_ENABLED: "true"
         run: python src/process_stories.py
