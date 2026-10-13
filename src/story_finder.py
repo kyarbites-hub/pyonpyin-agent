@@ -247,6 +247,7 @@ def filter_existing_books(service, books):
     ).execute()
 
     rows = result.get("values", [])
+    print(f"Existing rows read from Google Sheets:{len(rows)}")
 
     # ရှိပြီးသား URL တွေကို Set ထဲမှာ သိမ်းမယ်
     existing_urls = set()
