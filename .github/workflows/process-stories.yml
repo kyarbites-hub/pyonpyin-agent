@@ -40,6 +40,6 @@ jobs:
           GOOGLE_SPREADSHEET_ID: ${{ vars.GOOGLE_SPREADSHEET_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          PYONPYIN_GEMINI_AUTOMATION_ENABLED: ${{ vars.PYONPYIN_GEMINI_AUTOMATION_ENABLED }}
-          PYONPYIN_PUBLISHING_ENABLED: "true"
+          PYONPYIN_GEMINI_AUTOMATION_ENABLED: "true"
+          PYONPYIN_PUBLISHING_ENABLED: "false"
         run: python src/process_stories.py
