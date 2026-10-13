@@ -36,7 +36,7 @@ def queue_eligible_stories(store, library_records, production_rows):
     return queued_count
 
 
-def process_queued_stories(store, client=None, max_drafts=1):
+def process_queued_stories(store, client=None, max_drafts=1, target_story_id=""):
     if max_drafts < 1:
         raise ValueError("max_drafts must be at least 1.")
     library_records = store.read_records("Story Library")
@@ -47,7 +47,9 @@ def process_queued_stories(store, client=None, max_drafts=1):
         print(f"Queued {queued_count} eligible Story Library record(s).")
     queued = [
         row for row in production_rows
-        if row.get("processing_status", "").strip().upper() == "QUEUED"
+        if row.get("processing_status", "").strip().upper()
+        in ({"QUEUED", "DISPATCHED"} if target_story_id else {"QUEUED"})
+        and (not target_story_id or row.get("story_id") == target_story_id)
     ][:max_drafts]
     if not queued:
         print("No selected stories are queued for processing.")
@@ -231,7 +233,11 @@ def main():
         return 0
     store = SheetsStore()
     store.ensure_schema()
-    failures = process_queued_stories(store, max_drafts=1)
+    failures = process_queued_stories(
+        store,
+        max_drafts=1,
+        target_story_id=os.environ.get("PYONPYIN_STORY_ID", "").strip(),
+    )
     return 1 if failures else 0
 
 

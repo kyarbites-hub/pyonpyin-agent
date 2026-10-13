@@ -65,6 +65,50 @@ class WorkflowTests(unittest.TestCase):
         ):
             self.assertEqual(saved[field], record[field])
 
+    def test_sheets_upsert_many_coalesces_duplicate_keys_and_preserves_existing_columns(self):
+        store = SheetsStore(service=object(), spreadsheet_id="test-sheet")
+
+        class Values:
+            def get(self, **_kwargs):
+                return {"operation": "get"}
+
+            def batchUpdate(self, **kwargs):
+                return {"operation": "update", **kwargs}
+
+            def append(self, **kwargs):
+                return {"operation": "append", **kwargs}
+
+        values = Values()
+        def execute(request):
+            if request["operation"] == "get":
+                return {"values": [
+                    ["story_id", "title", "license_evidence"],
+                    ["existing", "Old title", "human evidence"],
+                ]}
+            return request
+
+        with patch.object(store, "_values", return_value=values), patch.object(
+            store, "_execute", side_effect=execute,
+        ) as execute:
+            rows = store.upsert_many("Story Library", "story_id", [
+                {"story_id": "existing", "title": "Updated title"},
+                {"story_id": "new-story", "title": "First value"},
+                {"story_id": "new-story", "title": "Final value"},
+            ])
+
+        self.assertEqual(rows, [2, 3])
+        self.assertEqual(execute.call_count, 3)
+        update_request = execute.call_args_list[1].args[0]
+        append_request = execute.call_args_list[2].args[0]
+        self.assertEqual(
+            update_request["body"]["data"][0]["values"],
+            [["existing", "Updated title", "human evidence"]],
+        )
+        self.assertEqual(
+            append_request["body"]["values"],
+            [["new-story", "Final value", ""]],
+        )
+
     def test_gemini_request_has_output_limit_and_only_one_transient_retry(self):
         client = GeminiClient(api_key="test-key")
 
@@ -684,6 +728,80 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(store.production["processing_status"], "BLOCKED_RIGHTS")
         self.assertEqual(store.history[0]["status"], "BLOCKED_RIGHTS")
 
+    def test_pipeline_dispatch_target_processes_only_the_requested_dispatched_story(self):
+        def eligible_story(story_id):
+            return {
+                "story_id": story_id,
+                "category": "CHILDREN",
+                "license_status": "APPROVED",
+                "rights_cleared": "YES",
+                "human_reviewer": "Reviewer",
+                "license_evidence": "Evidence",
+                "rights_jurisdiction": "Myanmar",
+                "permission_for_translation": "YES",
+                "permission_for_ai_processing": "YES",
+            }
+
+        stories = [eligible_story("pp-dispatched"), eligible_story("pp-next")]
+        production = [
+            {"story_id": "pp-dispatched", "processing_status": "DISPATCHED"},
+            {"story_id": "pp-next", "processing_status": "QUEUED"},
+        ]
+
+        class FakeStore:
+            def __init__(self):
+                self.production = [dict(row) for row in production]
+                self.writes = []
+                self.episodes = []
+
+            def read_records(self, sheet):
+                return stories if sheet == "Story Library" else self.production
+
+            def read_texts(self, _text_type):
+                return {"pp-dispatched": "source"}
+
+            def write_production(self, row):
+                target = next(item for item in self.production if item["story_id"] == row["story_id"])
+                target.update(row)
+                self.writes.append(dict(row))
+
+            def write_episodes(self, _story_id, episodes):
+                self.episodes.extend(episodes)
+
+            def record_processing(self, _row):
+                pass
+
+        class FakeGemini:
+            model = "offline-model"
+            retry_count = 0
+
+            def __init__(self):
+                self.called_story_ids = []
+
+            def generate_draft(self, story, _source):
+                self.called_story_ids.append(story["story_id"])
+                return {
+                    "title": "ခေါင်းစဉ်",
+                    "story": "ပုံပြင်",
+                    "episodes": [{"episode_number": 1, "title": "အပိုင်း", "content": "ပုံပြင်"}],
+                    "quiz": [{"question": "မေးခွန်း", "answer": "အဖြေ"}],
+                    "reflection": "စဉ်းစားရန်",
+                }
+
+        store = FakeStore()
+        client = FakeGemini()
+        self.assertEqual(
+            process_queued_stories(store, client, target_story_id="pp-dispatched"),
+            0,
+        )
+        self.assertEqual(client.called_story_ids, ["pp-dispatched"])
+        self.assertEqual(
+            next(row for row in store.production if row["story_id"] == "pp-next")[
+                "processing_status"
+            ],
+            "QUEUED",
+        )
+
     def test_queue_eligible_library_records_uses_safe_policy_and_preserves_existing_rows(self):
         verified_story = {
             "story_id": "pp-verified",
@@ -1167,7 +1285,13 @@ class WorkflowTests(unittest.TestCase):
             "story_id": story_id, "myanmar_title": "ခေါင်းစဉ်",
             "myanmar_story": "ပုံပြင်",
             "episodes_json": json.dumps([
-                {"episode_number": 1, "title": "အပိုင်း ၁", "content": "ပုံပြင်"}
+                {
+                    "episode_number": 1,
+                    "title": "အပိုင်း ၁",
+                    "content": "ပုံပြင်",
+                    "audio_url": "https://audio.example/unreviewed.mp3",
+                    "audio_status": "NOT_READY",
+                }
             ], ensure_ascii=False),
             "content_review_status": "APPROVED", "approval_status": "APPROVED",
             "audio_required": "NO",
@@ -1194,7 +1318,484 @@ class WorkflowTests(unittest.TestCase):
             response = web_app.app.test_client().get("/api/stories")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json[0]["story"], "ပုံပြင်")
+        self.assertEqual(response.json[0]["episodes"][0]["audio_url"], "")
+        self.assertNotIn("unreviewed.mp3", response.get_data(as_text=True))
         self.assertNotIn("source_text", response.get_data(as_text=True))
+
+    def test_admin_api_requires_session_and_returns_only_review_metadata(self):
+        story = {
+            "story_id": "pp-admin-api",
+            "original_title": "Review fixture",
+            "source_text": "PRIVATE SOURCE TEXT",
+            "source_url": "https://example.org/private-work",
+            "source_name": "Fixture source",
+            "category": "UNCLASSIFIED",
+            "category_evidence": "No reliable evidence",
+            "license_status": "NEEDS_LICENSE_REVIEW",
+            "rights_cleared": "NO",
+            "review_status": "PENDING_REVIEW",
+            "license_evidence": "",
+            "rights_jurisdiction": "",
+            "human_reviewer": "",
+        }
+        production = {
+            "story_id": "pp-admin-api",
+            "processing_status": "NOT_QUEUED",
+            "processing_error": "",
+            "approval_status": "",
+            "content_review_status": "PENDING",
+            "audio_status": "NOT_READY",
+        }
+        class FakeStore:
+            def read_records(self, sheet):
+                if sheet == "Story Library":
+                    return [story]
+                if sheet == "Story Production":
+                    return [production]
+                if sheet == "Publishing History":
+                    return []
+                return []
+
+        with patch.object(web_app, "_store", return_value=FakeStore()):
+            client = web_app.app.test_client()
+            self.assertEqual(client.get("/api/admin/overview").status_code, 401)
+            with client.session_transaction() as session:
+                session["admin_authenticated"] = True
+            response = client.get("/api/admin/overview")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["counts"]["stories"], 1)
+        self.assertEqual(response.json["counts"]["rights_review"], 1)
+        self.assertEqual(response.json["stories"][0]["category"], "UNCLASSIFIED")
+        self.assertNotIn("source_text", response.get_data(as_text=True))
+        self.assertNotIn("GEMINI_API_KEY", response.get_data(as_text=True))
+        self.assertNotIn("PRIVATE SOURCE TEXT", response.get_data(as_text=True))
+
+    def test_admin_api_login_uses_existing_password_session_and_csrf_protection(self):
+        with patch.dict(os.environ, {
+            "PYONPYIN_ADMIN_PASSWORD": "offline-test-password",
+            "PYONPYIN_SESSION_SECRET": "offline-test-session-secret",
+        }):
+            client = web_app.app.test_client()
+            denied = client.post(
+                "/api/admin/login",
+                json={"password": "wrong-password"},
+            )
+            self.assertEqual(denied.status_code, 401)
+            accepted = client.post(
+                "/api/admin/login",
+                json={"password": "offline-test-password"},
+            )
+            self.assertEqual(accepted.status_code, 200)
+            csrf_token = accepted.json["csrf_token"]
+            missing_csrf = client.post("/api/admin/logout")
+            self.assertEqual(missing_csrf.status_code, 400)
+            logged_out = client.post(
+                "/api/admin/logout",
+                headers={"X-CSRF-Token": csrf_token},
+            )
+            self.assertEqual(logged_out.status_code, 200)
+            self.assertEqual(client.get("/api/admin/jobs").status_code, 401)
+
+    def test_admin_rights_review_requires_explicit_evidence_permissions_and_csrf(self):
+        library = {
+            "story_id": "pp-rights-review",
+            "source_text": "PRIVATE SOURCE",
+            "category": "UNCLASSIFIED",
+            "license_status": "NEEDS_LICENSE_REVIEW",
+            "rights_cleared": "NO",
+        }
+
+        class FakeStore:
+            writes = []
+
+            def read_records(self, sheet):
+                return [library] if sheet == "Story Library" else []
+
+            def upsert_story(self, story):
+                library.update(story)
+                self.writes.append(dict(story))
+
+        payload = {
+            "category": "CHILDREN",
+            "category_evidence": "Human-verified publisher age category",
+            "license_status": "APPROVED",
+            "rights_cleared": "YES",
+            "human_reviewer": "Rights reviewer",
+            "license_evidence": "Verified work-specific permission",
+            "rights_jurisdiction": "Myanmar",
+            "permission_for_translation": "YES",
+            "permission_for_ai_processing": "YES",
+            "permission_for_publication": "NO",
+            "permission_for_audio": "NO",
+            "permission_for_commercial_use": "NO",
+        }
+        store = FakeStore()
+        with patch.object(web_app, "_store", return_value=store):
+            client = web_app.app.test_client()
+            self.assertEqual(
+                client.put("/api/admin/story/pp-rights-review/rights-review", json=payload).status_code,
+                400,
+            )
+            with client.session_transaction() as session:
+                session["admin_authenticated"] = True
+                session["csrf_token"] = "rights-csrf"
+            missing_csrf = client.put(
+                "/api/admin/story/pp-rights-review/rights-review", json=payload
+            )
+            self.assertEqual(missing_csrf.status_code, 400)
+            incomplete = dict(payload, license_evidence="")
+            blocked = client.put(
+                "/api/admin/story/pp-rights-review/rights-review",
+                json=incomplete,
+                headers={"X-CSRF-Token": "rights-csrf"},
+            )
+            self.assertEqual(blocked.status_code, 409)
+            self.assertEqual(store.writes, [])
+            malformed = dict(payload, category=[])
+            rejected = client.put(
+                "/api/admin/story/pp-rights-review/rights-review",
+                json=malformed,
+                headers={"X-CSRF-Token": "rights-csrf"},
+            )
+            self.assertEqual(rejected.status_code, 400)
+            saved = client.put(
+                "/api/admin/story/pp-rights-review/rights-review",
+                json=payload,
+                headers={"X-CSRF-Token": "rights-csrf"},
+            )
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(library["rights_cleared"], "YES")
+        self.assertEqual(library["permission_for_publication"], "NO")
+        self.assertEqual(library["review_status"], "REVIEWED")
+        self.assertEqual(library["source_text"], "PRIVATE SOURCE")
+        self.assertEqual(len(store.writes), 1)
+
+    def test_github_dispatch_is_opt_in_policy_checked_and_idempotent_for_queued_story(self):
+        story = {
+            "story_id": "pp-dispatch",
+            "category": "CHILDREN",
+            "category_evidence": "Human-reviewed category",
+            "rights_mode": "UNKNOWN",
+            "broad_theme": "kindness",
+            "rights_cleared": "NO",
+            "license_status": "NEEDS_LICENSE_REVIEW",
+        }
+        production = {
+            "story_id": "pp-dispatch",
+            "draft_mode": "ORIGINAL_THEME",
+            "processing_status": "QUEUED",
+        }
+
+        class FakeStore:
+            def __init__(self):
+                self.writes = []
+                self.history = []
+
+            def read_records(self, sheet):
+                if sheet == "Story Library":
+                    return [story]
+                if sheet == "Story Production":
+                    return [production]
+                return []
+
+            def write_production(self, row):
+                production.update(row)
+                self.writes.append(dict(row))
+
+            def record_processing(self, row):
+                self.history.append(dict(row))
+
+        class Response:
+            status = 204
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        store = FakeStore()
+        settings = {
+            "PYONPYIN_GITHUB_DISPATCH_ENABLED": "true",
+            "PYONPYIN_GEMINI_AUTOMATION_ENABLED": "true",
+            "PYONPYIN_GITHUB_TOKEN": "test-token-not-a-real-credential",
+            "PYONPYIN_GITHUB_REPOSITORY": "kyarbites-hub/pyonpyin-agent",
+            "PYONPYIN_GITHUB_REF": "main",
+        }
+        with patch.object(web_app, "_store", return_value=store), patch.dict(
+            os.environ, settings
+        ), patch("pyonpyin.web_app.urllib.request.urlopen", return_value=Response()) as urlopen:
+            client = web_app.app.test_client()
+            with client.session_transaction() as session:
+                session["admin_authenticated"] = True
+                session["csrf_token"] = "dispatch-csrf"
+            disabled = None
+            with patch.dict(os.environ, {"PYONPYIN_GITHUB_DISPATCH_ENABLED": "false"}):
+                disabled = client.post(
+                    "/api/admin/jobs/dispatch",
+                    json={"story_id": "pp-dispatch"},
+                    headers={"X-CSRF-Token": "dispatch-csrf"},
+                )
+            self.assertEqual(disabled.status_code, 503)
+            self.assertEqual(urlopen.call_count, 0)
+            story["category_evidence"] = ""
+            blocked = client.post(
+                "/api/admin/jobs/dispatch",
+                json={"story_id": "pp-dispatch"},
+                headers={"X-CSRF-Token": "dispatch-csrf"},
+            )
+            self.assertEqual(blocked.status_code, 409)
+            self.assertEqual(urlopen.call_count, 0)
+            story["category_evidence"] = "Human-reviewed category"
+            accepted = client.post(
+                "/api/admin/jobs/dispatch",
+                json={"story_id": "pp-dispatch"},
+                headers={"X-CSRF-Token": "dispatch-csrf"},
+            )
+            duplicate = client.post(
+                "/api/admin/jobs/dispatch",
+                json={"story_id": "pp-dispatch"},
+                headers={"X-CSRF-Token": "dispatch-csrf"},
+            )
+
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(production["processing_status"], "DISPATCHED")
+        self.assertEqual(store.history[0]["status"], "DISPATCHED")
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(urlopen.call_count, 1)
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload, {"ref": "main", "inputs": {"story_id": "pp-dispatch"}})
+        self.assertNotIn("test-token-not-a-real-credential", json.dumps(payload))
+
+    def test_github_dispatch_timeout_is_unknown_and_not_automatically_retried(self):
+        story = {
+            "story_id": "pp-timeout",
+            "category": "CHILDREN",
+            "category_evidence": "Human-reviewed category",
+            "broad_theme": "friendship",
+        }
+        production = {
+            "story_id": "pp-timeout",
+            "draft_mode": "ORIGINAL_THEME",
+            "processing_status": "QUEUED",
+        }
+
+        class FakeStore:
+            def __init__(self):
+                self.history = []
+
+            def read_records(self, sheet):
+                return [story] if sheet == "Story Library" else [production]
+
+            def write_production(self, row):
+                production.update(row)
+
+            def record_processing(self, row):
+                self.history.append(dict(row))
+
+        settings = {
+            "PYONPYIN_GITHUB_DISPATCH_ENABLED": "true",
+            "PYONPYIN_GEMINI_AUTOMATION_ENABLED": "true",
+            "PYONPYIN_GITHUB_TOKEN": "test-token",
+            "PYONPYIN_GITHUB_REPOSITORY": "kyarbites-hub/pyonpyin-agent",
+        }
+        store = FakeStore()
+        with patch.object(web_app, "_store", return_value=store), patch.dict(
+            os.environ, settings
+        ), patch("pyonpyin.web_app.urllib.request.urlopen", side_effect=TimeoutError) as urlopen:
+            client = web_app.app.test_client()
+            with client.session_transaction() as session:
+                session["admin_authenticated"] = True
+                session["csrf_token"] = "timeout-csrf"
+            response = client.post(
+                "/api/admin/jobs/dispatch",
+                json={"story_id": "pp-timeout"},
+                headers={"X-CSRF-Token": "timeout-csrf"},
+            )
+            retry = client.post(
+                "/api/admin/jobs/dispatch",
+                json={"story_id": "pp-timeout"},
+                headers={"X-CSRF-Token": "timeout-csrf"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(production["processing_status"], "DISPATCH_UNKNOWN")
+        self.assertEqual(store.history[-1]["status"], "DISPATCH_UNKNOWN")
+        self.assertEqual(retry.status_code, 409)
+        self.assertEqual(urlopen.call_count, 1)
+
+
+    def test_admin_draft_editor_validates_episode_continuity_and_resets_content_review(self):
+        library = [{
+            "story_id": "pp-editor",
+            "category": "UNCLASSIFIED",
+            "rights_cleared": "NO",
+            "license_status": "NEEDS_LICENSE_REVIEW",
+        }]
+        production = {
+            "story_id": "pp-editor",
+            "approval_status": "APPROVED",
+            "content_review_status": "APPROVED",
+            "myanmar_story": "Old story",
+        }
+
+        class FakeStore:
+            writes = []
+            episode_writes = []
+
+            def read_records(self, sheet):
+                if sheet == "Story Library":
+                    return library
+                if sheet == "Story Production":
+                    return [production]
+                return []
+
+            def write_production(self, row):
+                production.update(row)
+                self.writes.append(dict(row))
+
+            def write_episodes(self, story_id, episodes):
+                self.episode_writes.append((story_id, episodes))
+
+        store = FakeStore()
+        with patch.object(web_app, "_store", return_value=store):
+            client = web_app.app.test_client()
+            with client.session_transaction() as session:
+                session["admin_authenticated"] = True
+                session["csrf_token"] = "editor-csrf"
+            missing_csrf = client.put(
+                "/api/admin/story/pp-editor/draft",
+                json={},
+            )
+            self.assertEqual(missing_csrf.status_code, 400)
+            payload = {
+                "myanmar_title": "ခေါင်းစဉ်",
+                "myanmar_story": "အစအဆုံး။",
+                "episodes": [{
+                    "episode_number": 1,
+                    "title": "အပိုင်း ၁",
+                    "content": "အစအဆုံး။",
+                }],
+                "quiz": [{"question": "မေးခွန်း", "answer": "အဖြေ"}],
+                "reflection": "စဉ်းစားရန်",
+                "audio_url": "",
+                "audio_status": "NOT_READY",
+            }
+            invalid = dict(payload)
+            invalid["episodes"] = [{
+                "episode_number": 1,
+                "title": "အပိုင်း ၁",
+                "content": "အခြားစာသား",
+            }]
+            rejected = client.put(
+                "/api/admin/story/pp-editor/draft",
+                json=invalid,
+                headers={"X-CSRF-Token": "editor-csrf"},
+            )
+            self.assertEqual(rejected.status_code, 400)
+            self.assertEqual(store.writes, [])
+            unauthorized_audio = dict(payload)
+            unauthorized_audio["audio_url"] = "https://example.org/audio.mp3"
+            unauthorized_audio["audio_status"] = "READY"
+            blocked_audio = client.put(
+                "/api/admin/story/pp-editor/draft",
+                json=unauthorized_audio,
+                headers={"X-CSRF-Token": "editor-csrf"},
+            )
+            self.assertEqual(blocked_audio.status_code, 409)
+            self.assertEqual(store.writes, [])
+            saved = client.put(
+                "/api/admin/story/pp-editor/draft",
+                json=payload,
+                headers={"X-CSRF-Token": "editor-csrf"},
+            )
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(production["processing_status"], "HUMAN_EDITING")
+        self.assertEqual(production["content_review_status"], "PENDING")
+        self.assertEqual(production["approval_status"], "")
+        self.assertEqual(library[0]["rights_cleared"], "NO")
+        self.assertEqual(library[0]["license_status"], "NEEDS_LICENSE_REVIEW")
+        self.assertEqual(len(store.episode_writes), 1)
+
+    def test_admin_content_approval_is_not_publication_approval(self):
+        production = {
+            "story_id": "pp-content-review",
+            "myanmar_title": "ခေါင်းစဉ်",
+            "myanmar_story": "ပုံပြင်။",
+            "episodes_json": json.dumps([{
+                "episode_number": 1,
+                "title": "အပိုင်း ၁",
+                "content": "ပုံပြင်။",
+                "complete": "YES",
+            }], ensure_ascii=False),
+            "quiz_json": json.dumps([{"question": "မေးခွန်း", "answer": "အဖြေ"}], ensure_ascii=False),
+            "reflection_json": json.dumps("စဉ်းစားရန်", ensure_ascii=False),
+            "approval_status": "",
+            "content_review_status": "PENDING",
+        }
+
+        class FakeStore:
+            history = []
+
+            def read_records(self, sheet):
+                return [production] if sheet == "Story Production" else []
+
+            def write_production(self, row):
+                production.update(row)
+
+            def record_processing(self, row):
+                self.history.append(row)
+
+        store = FakeStore()
+        with patch.object(web_app, "_store", return_value=store):
+            client = web_app.app.test_client()
+            with client.session_transaction() as session:
+                session["admin_authenticated"] = True
+                session["csrf_token"] = "review-csrf"
+            response = client.post(
+                "/api/admin/story/pp-content-review/content-review",
+                json={"action": "approve"},
+                headers={"X-CSRF-Token": "review-csrf"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["content_review_status"], "APPROVED")
+        self.assertTrue(response.json["publication_approval_required"])
+        self.assertEqual(production["approval_status"], "")
+        self.assertEqual(production["processing_status"], "CONTENT_APPROVED")
+        self.assertEqual(store.history[0]["status"], "CONTENT_APPROVED")
+
+    def test_public_api_does_not_include_unpublished_drafts(self):
+        draft_story = {
+            "story_id": "pp-private-draft",
+            "category": "UNCLASSIFIED",
+            "source_text": "Private source",
+        }
+        draft = {
+            "story_id": "pp-private-draft",
+            "myanmar_title": "Private draft",
+            "myanmar_story": "Not published",
+            "episodes_json": "[]",
+            "content_review_status": "PENDING",
+            "approval_status": "",
+        }
+        class FakeStore:
+            def read_records(self, sheet):
+                if sheet == "Story Library":
+                    return [draft_story]
+                if sheet == "Story Production":
+                    return [draft]
+                return []
+
+            def read_texts(self, _text_type):
+                return {}
+
+        with patch.object(web_app, "_store", return_value=FakeStore()):
+            response = web_app.app.test_client().get("/api/stories")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, [])
 
     def test_dashboard_requires_authentication_and_sets_security_headers(self):
         class FakeStore:

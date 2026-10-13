@@ -2,9 +2,12 @@ name: PyonPyin Rights-Cleared Story Processing
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "47 2 * * 1"
-
+    inputs:
+      story_id:
+        description: "One explicitly queued story ID to process (blank selects the next queued story)"
+        required: false
+        type: string
+        default: ""
 permissions:
   contents: read
 
@@ -34,12 +37,14 @@ jobs:
             exit 1
           fi
       - name: Process one opt-in, policy-safe draft
+        if: vars.PYONPYIN_GEMINI_AUTOMATION_ENABLED == 'true'
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
           GOOGLE_SPREADSHEET_ID: ${{ vars.GOOGLE_SPREADSHEET_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          PYONPYIN_GEMINI_AUTOMATION_ENABLED: "true"
+          PYONPYIN_GEMINI_AUTOMATION_ENABLED: ${{ vars.PYONPYIN_GEMINI_AUTOMATION_ENABLED }}
           PYONPYIN_PUBLISHING_ENABLED: "false"
+          PYONPYIN_STORY_ID: ${{ inputs.story_id }}
         run: python src/process_stories.py

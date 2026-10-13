@@ -1,0 +1,190 @@
+export interface Episode {
+  episode_number: number;
+  title: string;
+  content: string;
+  audio_url?: string;
+  audio_status?: string;
+}
+
+export interface PublicStory {
+  story_id: string;
+  category: "CHILDREN" | "ADULT";
+  title: string;
+  story: string;
+  episodes: Episode[];
+  audio_url: string;
+  reading_minutes?: number;
+  quiz?: Array<{ question: string; answer: string }>;
+  reflection?: string;
+  demo_sample?: boolean;
+}
+
+export interface AdminStory {
+  story_id: string;
+  title: string;
+  category: string;
+  license_status: string;
+  review_status: string;
+  processing_status: string;
+  processing_error: string;
+  audio_status: string;
+  published: boolean;
+  source_name: string;
+  source_url: string;
+  license_name?: string;
+  license_url?: string;
+  license_evidence: string;
+  rights_jurisdiction: string;
+  rights_cleared: string;
+  permission_for_translation?: string;
+  permission_for_ai_processing?: string;
+  permission_for_publication?: string;
+  permission_for_audio?: string;
+  permission_for_commercial_use?: string;
+  human_reviewer: string;
+  category_evidence: string;
+}
+
+export interface Overview {
+  csrf_token: string;
+  counts: {
+    stories: number;
+    pending_review: number;
+    rights_review: number;
+    content_review: number;
+    approved: number;
+    drafts: number;
+    audio_ready: number;
+    published: number;
+  };
+  stories: AdminStory[];
+}
+
+export interface JobHistory {
+  processing_id: string;
+  story_id: string;
+  status: string;
+  started_at: string;
+  completed_at: string;
+  retry_count: string;
+  error_details: string;
+}
+
+export interface JobStatus {
+  active: Array<{
+    story_id: string;
+    status: string;
+    error: string;
+    updated_at: string;
+  }>;
+  history: JobHistory[];
+  publishing_history: Array<{
+    story_id: string;
+    published_title: string;
+    website_url: string;
+    published_at: string;
+    publication_status: string;
+    approved_by: string;
+  }>;
+  dispatch_configured: boolean;
+}
+
+export interface AdminStoryDetail {
+  story: Record<string, string>;
+  production: Record<string, string>;
+  episodes: Episode[];
+  quiz: Array<{ question: string; answer: string }>;
+  reflection: string | string[];
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    ...init,
+    headers,
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as
+      | { error?: string }
+      | null;
+    throw new Error(payload?.error || `Request failed (${response.status}).`);
+  }
+  return (await response.json()) as T;
+}
+
+export const api = {
+  stories: () => request<PublicStory[]>("/api/stories"),
+  overview: () => request<Overview>("/api/admin/overview"),
+  jobs: () => request<JobStatus>("/api/admin/jobs"),
+  dispatchJob: (storyId: string, csrfToken: string) =>
+    request<{ ok: boolean; story_id: string; status: string }>(
+      "/api/admin/jobs/dispatch",
+      {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ story_id: storyId }),
+      },
+    ),
+  story: (storyId: string) =>
+    request<AdminStoryDetail>(`/api/admin/story/${encodeURIComponent(storyId)}`),
+  reviewRights: (storyId: string, csrfToken: string, review: {
+    category: string;
+    category_evidence: string;
+    license_status: string;
+    rights_cleared: string;
+    human_reviewer: string;
+    license_evidence: string;
+    rights_jurisdiction: string;
+    permission_for_translation: string;
+    permission_for_ai_processing: string;
+    permission_for_publication: string;
+    permission_for_audio: string;
+    permission_for_commercial_use: string;
+  }) => request<{ ok: boolean; category: string; license_status: string; rights_cleared: string; review_status: string }>(
+    `/api/admin/story/${encodeURIComponent(storyId)}/rights-review`,
+    {
+      method: "PUT",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: JSON.stringify(review),
+    },
+  ),
+  saveDraft: (storyId: string, csrfToken: string, draft: {
+    myanmar_title: string;
+    myanmar_story: string;
+    episodes: Episode[];
+    quiz: Array<{ question: string; answer: string }>;
+    reflection: string | string[];
+    audio_url: string;
+    audio_status: string;
+  }) => request<{ ok: boolean; processing_status: string }>(
+    `/api/admin/story/${encodeURIComponent(storyId)}/draft`,
+    {
+      method: "PUT",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: JSON.stringify(draft),
+    },
+  ),
+  reviewContent: (storyId: string, action: "approve" | "reject", csrfToken: string) =>
+    request<{ ok: boolean; content_review_status: string }>(
+      `/api/admin/story/${encodeURIComponent(storyId)}/content-review`,
+      {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ action }),
+      },
+    ),
+  login: (password: string) =>
+    request<{ csrf_token: string }>("/api/admin/login", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
+  logout: (csrfToken: string) =>
+    request<{ ok: boolean }>("/api/admin/logout", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+    }),
+};

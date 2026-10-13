@@ -1,5 +1,18 @@
 # PyonPyin AI Story Platform
 
+Implementation status, setup/secrets, deployment, and test guidance:
+[MVP plan](docs/MVP_IMPLEMENTATION_PLAN.md) ·
+[Architecture](docs/ARCHITECTURE.md) ·
+[Setup and secrets](docs/SETUP_AND_SECRETS.md) ·
+[Deployment](docs/DEPLOYMENT.md) ·
+[Testing](docs/TESTING.md).
+
+The current system is a modular monolith: the public site and admin dashboard
+are distinct routes/layouts in one React SPA, Flask serves the same-origin API
+and built frontend, and discovery/generation run as separate Python
+entrypoints. See the architecture guide for verified boundaries and the staged
+path to independent deployments.
+
 PyonPyin is a Python-based story discovery and review workflow. It keeps Google
 Sheets as the control center, prepares safe Myanmar-language story drafts with
 Gemini, and provides an authenticated admin dashboard plus a public
@@ -187,6 +200,45 @@ precedence if both credential methods are configured.
 Open `http://127.0.0.1:8000/` for the public site or
 `http://127.0.0.1:8000/admin/login` for the admin login. Keep credential JSON
 outside the repository; the example filename above is only illustrative.
+
+### React and TypeScript website foundation
+
+The React application is in `frontend/` and uses Vite. Install Node.js 20 or
+newer, then in one PowerShell terminal start Flask (use the project's existing
+Python environment and set the admin password/session secret first):
+
+```powershell
+$env:PYTHONPATH = "src"
+$env:PYONPYIN_ADMIN_PASSWORD = Read-Host "Local admin password"
+$env:PYONPYIN_SESSION_SECRET = (& python -c "import secrets; print(secrets.token_urlsafe(48))").Trim()
+$env:PYONPYIN_PUBLISHING_ENABLED = "false"
+python -m pyonpyin.web_app
+```
+
+In a second PowerShell terminal:
+
+```powershell
+Set-Location frontend
+if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173/` for the public Burmese site and
+`http://127.0.0.1:5173/#/admin` for the admin preview. Development mode uses
+clearly labeled fixture counts and an empty public catalogue; it makes no
+Sheets or Gemini request. To connect real data, configure server-side Sheets
+credentials, then set `VITE_DEMO_MODE=false` in `frontend/.env.local` and
+restart Vite. Never place server credentials in a `VITE_` variable. The admin
+API continues to require the Flask session login and CSRF token.
+
+For a production frontend build, run `npm run build` from `frontend/`; Flask
+serves the generated app at `/app` and `/admin/app`. Public data is obtained
+only from the published-only Flask API. The dashboard can read job history but
+does not dispatch jobs in this foundation; no GitHub credential is configured
+or exposed. The workflow processing step is also gated on the explicit
+`PYONPYIN_GEMINI_AUTOMATION_ENABLED=true` repository variable. Publishing
+remains disabled.
 
 The processing job is opt-in because Gemini requests may use quota or incur
 charges. To enable local processing, first verify the selected model and

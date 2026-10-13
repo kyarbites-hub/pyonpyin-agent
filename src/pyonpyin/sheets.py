@@ -172,12 +172,16 @@ class SheetsStore:
 
     def upsert_many(self, sheet_name, key_column, records):
         self._check_sheet(sheet_name)
-        records = list(records)
-        if not records:
-            return []
+        records_by_key = {}
         for record in records:
-            if not record.get(key_column):
+            key = record.get(key_column)
+            if not key:
                 raise ValueError(f"{key_column} is required for an idempotent Sheets update.")
+            key = str(key)
+            records_by_key.setdefault(key, {}).update(record)
+        if not records_by_key:
+            return []
+        records = list(records_by_key.values())
         result = self._execute(self._values().get(
             spreadsheetId=self.spreadsheet_id, range=f"'{sheet_name}'!A:ZZ"
         ))

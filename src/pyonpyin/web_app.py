@@ -3,18 +3,29 @@
 import hmac
 import json
 import os
+import re
 import secrets
+import urllib.error
+import urllib.request
 import uuid
 from functools import wraps
+from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, jsonify, redirect, render_template_string, request, session, url_for
+from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
 
-from pyonpyin.core import eligible_candidate, normalize_url, publication_blockers, utc_now
+from pyonpyin.core import (
+    eligible_candidate,
+    normalize_url,
+    publication_blockers,
+    safe_story_theme,
+    utc_now,
+)
 from pyonpyin.sheets import SHEET_CELL_SAFE_LIMIT, SheetsStore
 
 
 app = Flask(__name__)
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 app.secret_key = os.environ.get("PYONPYIN_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
@@ -163,9 +174,15 @@ def inject_csrf_token():
 
 @app.before_request
 def check_admin_csrf():
-    if request.method == "POST" and request.path.startswith("/admin/") and request.path != "/admin/login":
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and (
+        request.path.startswith("/admin/")
+        or request.path.startswith("/api/admin/")
+    ) and request.path not in {"/admin/login", "/api/admin/login"}:
         expected = session.get("csrf_token", "")
-        provided = request.form.get("csrf_token", "")
+        provided = (
+            request.headers.get("X-CSRF-Token", "")
+            or request.form.get("csrf_token", "")
+        )
         if not expected or not hmac.compare_digest(expected, provided):
             abort(400, "Invalid or missing CSRF token.")
 
@@ -177,6 +194,46 @@ def _admin_required(function):
             return redirect(url_for("admin_login"))
         return function(*args, **kwargs)
     return wrapped
+
+
+def _admin_api_required(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        if not session.get("admin_authenticated"):
+            return jsonify({"error": "Authentication required."}), 401
+        return function(*args, **kwargs)
+    return wrapped
+
+
+def _frontend_file(path="index.html"):
+    if not FRONTEND_DIST.is_dir():
+        abort(404, "Frontend assets are not built. Run npm run build in frontend/.")
+    return send_from_directory(FRONTEND_DIST, path)
+
+
+@app.get("/app")
+def frontend_app():
+    return _frontend_file()
+
+
+@app.get("/app/<path:asset>")
+def frontend_asset(asset):
+    return _frontend_file(asset)
+
+
+@app.get("/assets/<path:asset>")
+def frontend_built_asset(asset):
+    return _frontend_file(f"assets/{asset}")
+
+
+@app.get("/admin/app")
+def frontend_admin_app():
+    return _frontend_file()
+
+
+@app.get("/admin/app/<path:asset>")
+def frontend_admin_asset(asset):
+    return _frontend_file(asset)
 
 
 @app.route("/admin/login", methods=["GET", "POST"])
@@ -195,6 +252,667 @@ def admin_login():
     <form method=post><label>Admin password <input type=password name=password required></label>
     <button>Sign in</button></form>"""
 
+
+@app.post("/api/admin/login")
+def admin_api_login():
+    password = os.environ.get("PYONPYIN_ADMIN_PASSWORD")
+    session_secret = os.environ.get("PYONPYIN_SESSION_SECRET")
+    if not password or not session_secret:
+        return jsonify({
+            "error": "Admin authentication is not configured on this server."
+        }), 503
+    supplied = request.get_json(silent=True) or {}
+    if not isinstance(supplied, dict) or not hmac.compare_digest(
+        str(supplied.get("password", "")), password
+    ):
+        return jsonify({"error": "Invalid credentials."}), 401
+    session.clear()
+    session["admin_authenticated"] = True
+    session.permanent = True
+    session["csrf_token"] = secrets.token_urlsafe(32)
+    return jsonify({"csrf_token": session["csrf_token"]})
+
+
+@app.post("/api/admin/logout")
+@_admin_api_required
+def admin_api_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/admin/overview")
+@_admin_api_required
+def admin_api_overview():
+    store = _store()
+    csrf_token = session.get("csrf_token")
+    if not csrf_token:
+        csrf_token = secrets.token_urlsafe(32)
+        session["csrf_token"] = csrf_token
+    library = store.read_records("Story Library")
+    production = store.read_records("Story Production")
+    published_ids = {
+        row.get("story_id")
+        for row in store.read_records("Publishing History")
+        if row.get("publication_status", "").strip().upper() == "PUBLISHED"
+    }
+    production_by_id = {row.get("story_id"): row for row in production}
+    pending_review = sum(
+        1 for story in library
+        if story.get("review_status", "").strip().upper() != "REVIEWED"
+        or story.get("license_status", "").strip().upper() == "NEEDS_LICENSE_REVIEW"
+    )
+    rights_review = sum(
+        1 for story in library
+        if story.get("rights_cleared", "").strip().upper() != "YES"
+        or story.get("license_status", "").strip().upper()
+        in {"", "NEEDS_LICENSE_REVIEW", "PENDING_REVIEW"}
+    )
+    content_review = sum(
+        1 for row in production
+        if row.get("processing_status", "").strip().upper() in {
+            "DRAFT_READY", "HUMAN_EDITING"
+        }
+        and row.get("content_review_status", "").strip().upper() != "APPROVED"
+    )
+    approved = sum(
+        1 for story in library
+        if eligible_candidate(story)
+        and production_by_id.get(story.get("story_id"), {}).get(
+            "content_review_status", ""
+        ).strip().upper() == "APPROVED"
+        and production_by_id.get(story.get("story_id"), {}).get(
+            "approval_status", ""
+        ).strip().upper() == "APPROVED"
+    )
+    drafts = sum(
+        1 for row in production
+        if row.get("processing_status", "").strip().upper()
+        in {"DRAFT_READY", "HUMAN_EDITING"}
+    )
+    audio_ready = sum(
+        1 for row in production
+        if row.get("audio_status", "").strip().upper() == "READY"
+    )
+    return jsonify({
+        "csrf_token": csrf_token,
+        "counts": {
+            "stories": len(library),
+            "pending_review": pending_review,
+            "rights_review": rights_review,
+            "content_review": content_review,
+            "approved": approved,
+            "drafts": drafts,
+            "audio_ready": audio_ready,
+            "published": len(published_ids),
+        },
+        "stories": [
+            {
+                "story_id": story.get("story_id", ""),
+                "title": story.get("original_title", ""),
+                "category": story.get("category", "UNCLASSIFIED"),
+                "license_status": story.get("license_status", ""),
+                "license_name": story.get("license_name", ""),
+                "review_status": story.get("review_status", ""),
+                "processing_status": production_by_id.get(
+                    story.get("story_id"), {}
+                ).get("processing_status", "NOT_QUEUED"),
+                "processing_error": production_by_id.get(
+                    story.get("story_id"), {}
+                ).get("processing_error", ""),
+                "audio_status": production_by_id.get(
+                    story.get("story_id"), {}
+                ).get("audio_status", ""),
+                "source_name": story.get("source_name", ""),
+                "source_url": normalize_url(story.get("source_url", "")),
+                "license_evidence": story.get("license_evidence", ""),
+                "license_url": story.get("license_url", ""),
+                "rights_jurisdiction": story.get("rights_jurisdiction", ""),
+                "rights_cleared": story.get("rights_cleared", "NO"),
+                "permission_for_translation": story.get("permission_for_translation", "NO"),
+                "permission_for_ai_processing": story.get("permission_for_ai_processing", "NO"),
+                "permission_for_publication": story.get("permission_for_publication", "NO"),
+                "permission_for_audio": story.get("permission_for_audio", "NO"),
+                "permission_for_commercial_use": story.get("permission_for_commercial_use", "NO"),
+                "human_reviewer": story.get("human_reviewer", ""),
+                "category_evidence": story.get("category_evidence", ""),
+                "published": story.get("story_id") in published_ids,
+            }
+            for story in library
+        ],
+    })
+
+
+@app.get("/api/admin/jobs")
+@_admin_api_required
+def admin_api_jobs():
+    store = _store()
+    history = store.read_records("Processing History")
+    publications = store.read_records("Publishing History")
+    active = [
+        row for row in store.read_records("Story Production")
+        if row.get("processing_status", "").strip().upper()
+        in {"QUEUED", "DISPATCHED", "GENERATING"}
+    ]
+    recent = sorted(
+        history,
+        key=lambda row: row.get("started_at", ""),
+        reverse=True,
+    )[:50]
+    return jsonify({
+        "active": [
+            {
+                "story_id": row.get("story_id", ""),
+                "status": row.get("processing_status", ""),
+                "error": row.get("processing_error", ""),
+                "updated_at": row.get("updated_at", ""),
+            }
+            for row in active
+        ],
+        "history": [
+            {
+                "processing_id": row.get("processing_id", ""),
+                "story_id": row.get("story_id", ""),
+                "status": row.get("status", ""),
+                "started_at": row.get("started_at", ""),
+                "completed_at": row.get("completed_at", ""),
+                "retry_count": row.get("retry_count", "0"),
+                "error_details": row.get("error_details", ""),
+            }
+            for row in recent
+        ],
+        "publishing_history": [
+            {
+                "story_id": row.get("story_id", ""),
+                "published_title": row.get("published_title", ""),
+                "website_url": row.get("website_url", ""),
+                "published_at": row.get("published_at", ""),
+                "publication_status": row.get("publication_status", ""),
+                "approved_by": row.get("approved_by", ""),
+            }
+            for row in sorted(
+                publications,
+                key=lambda item: item.get("published_at", ""),
+                reverse=True,
+            )[:50]
+        ],
+        "dispatch_configured": _github_dispatch_settings() is not None,
+    })
+
+
+def _github_dispatch_settings():
+    token = os.environ.get("PYONPYIN_GITHUB_TOKEN", "").strip()
+    repository = os.environ.get("PYONPYIN_GITHUB_REPOSITORY", "").strip()
+    ref = os.environ.get("PYONPYIN_GITHUB_REF", "main").strip()
+    repository_parts = repository.split("/")
+    if not (
+        os.environ.get("PYONPYIN_GITHUB_DISPATCH_ENABLED", "").lower() == "true"
+        and os.environ.get("PYONPYIN_GEMINI_AUTOMATION_ENABLED", "").lower() == "true"
+        and token
+        and len(repository_parts) == 2
+        and all(
+            re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", part) and part not in {".", ".."}
+            for part in repository_parts
+        )
+        and re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", ref)
+        and all(part not in {"", ".", ".."} for part in ref.split("/"))
+    ):
+        return None
+    return token, repository, ref
+
+
+@app.post("/api/admin/jobs/dispatch")
+@_admin_api_required
+def admin_api_dispatch_job():
+    settings = _github_dispatch_settings()
+    if settings is None:
+        abort(503, "GitHub dispatch is disabled or missing server-side configuration.")
+    token, repository, ref = settings
+    body = request.get_json(silent=True)
+    story_id = body.get("story_id") if isinstance(body, dict) else None
+    if not isinstance(story_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", story_id):
+        abort(400, "A valid queued story_id is required.")
+
+    store = _store()
+    library = next(
+        (row for row in store.read_records("Story Library") if row.get("story_id") == story_id),
+        None,
+    )
+    production = next(
+        (row for row in store.read_records("Story Production") if row.get("story_id") == story_id),
+        None,
+    )
+    if library is None or production is None:
+        abort(404, "Queued story was not found.")
+    if production.get("processing_status", "").strip().upper() != "QUEUED":
+        abort(409, "Story is not queued or has already been dispatched.")
+    if any(
+        row.get("story_id") != story_id
+        and row.get("processing_status", "").strip().upper() in {"DISPATCHED", "GENERATING"}
+        for row in store.read_records("Story Production")
+    ):
+        abort(409, "Another story is already dispatched or generating; wait for it to finish.")
+    draft_mode = production.get("draft_mode", "").strip().upper()
+    if draft_mode == "ORIGINAL_THEME":
+        if (
+            library.get("category", "").strip().upper() not in {"CHILDREN", "ADULT"}
+            or not library.get("category_evidence", "").strip()
+            or not safe_story_theme(library.get("category", ""), library.get("broad_theme", ""))
+        ):
+            abort(409, "Theme-only generation requires a reviewed category and safe broad theme.")
+    elif not eligible_candidate(library):
+        abort(409, "Source-based generation requires explicit rights and permissions.")
+    elif draft_mode not in {"PUBLIC_DOMAIN_RETELLING", "RIGHTS_CLEARED_SOURCE"}:
+        abort(409, "Unsupported draft mode.")
+
+    processing_id = f"{story_id}-dispatch-{uuid.uuid4().hex[:12]}"
+    started_at = utc_now()
+    production.update({
+        "processing_status": "DISPATCHED",
+        "processing_error": "",
+    })
+    store.write_production(production)
+    store.record_processing({
+        "processing_id": processing_id,
+        "story_id": story_id,
+        "status": "DISPATCHED",
+        "started_at": started_at,
+        "completed_at": "",
+        "retry_count": "0",
+        "error_details": "",
+    })
+
+    payload = json.dumps({
+        "ref": ref,
+        "inputs": {"story_id": story_id},
+    }).encode("utf-8")
+    dispatch = urllib.request.Request(
+        f"https://api.github.com/repos/{repository}/actions/workflows/process-stories.yml/dispatches",
+        data=payload,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(dispatch, timeout=10) as response:
+            if response.status != 204:
+                raise RuntimeError("GitHub did not accept the workflow dispatch.")
+    except urllib.error.HTTPError as exc:
+        production.update({
+            "processing_status": "DISPATCH_FAILED",
+            "processing_error": f"GitHub Actions rejected dispatch (HTTP {exc.code}).",
+        })
+        store.write_production(production)
+        store.record_processing({
+            "processing_id": processing_id,
+            "story_id": story_id,
+            "status": "DISPATCH_FAILED",
+            "started_at": started_at,
+            "completed_at": utc_now(),
+            "retry_count": "0",
+            "error_details": f"GitHub Actions rejected dispatch (HTTP {exc.code}).",
+        })
+        abort(502, f"GitHub Actions rejected workflow dispatch (HTTP {exc.code}).")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        production.update({
+            "processing_status": "DISPATCH_UNKNOWN",
+            "processing_error": "Dispatch outcome is unknown; reconcile GitHub Actions before retrying.",
+        })
+        store.write_production(production)
+        store.record_processing({
+            "processing_id": processing_id,
+            "story_id": story_id,
+            "status": "DISPATCH_UNKNOWN",
+            "started_at": started_at,
+            "completed_at": utc_now(),
+            "retry_count": "0",
+            "error_details": type(exc).__name__,
+        })
+        abort(502, "GitHub Actions dispatch outcome is unknown; inspect Actions before any retry.")
+    return jsonify({"ok": True, "story_id": story_id, "status": "DISPATCHED"}), 202
+
+
+@app.get("/api/admin/story/<story_id>")
+@_admin_api_required
+def admin_api_story(story_id):
+    store = _store()
+    story = next(
+        (row for row in store.read_records("Story Library") if row.get("story_id") == story_id),
+        None,
+    )
+    if story is None:
+        abort(404)
+    production = next(
+        (row for row in store.read_records("Story Production") if row.get("story_id") == story_id),
+        {},
+    )
+    if not production.get("myanmar_story"):
+        production["myanmar_story"] = store.read_texts("MYANMAR").get(story_id, "")
+    production["episodes_json"] = _episode_json(store, story_id, production)
+    try:
+        episodes = json.loads(production.get("episodes_json") or "[]")
+        quiz = json.loads(production.get("quiz_json") or "[]")
+        reflection = json.loads(production.get("reflection_json") or "[]")
+    except json.JSONDecodeError:
+        abort(409, "The saved draft contains invalid JSON and requires administrator repair.")
+    return jsonify({
+        "story": {
+            key: story.get(key, "")
+            for key in (
+                "story_id", "original_title", "author", "source_name",
+                "source_url", "source_text", "category", "category_evidence",
+                "license_status", "license_name", "license_url",
+                "license_evidence", "rights_cleared", "rights_jurisdiction",
+                "permission_for_translation", "permission_for_ai_processing",
+                "permission_for_publication", "permission_for_audio",
+                "human_reviewer", "review_status", "rights_mode",
+            )
+        },
+        "production": {
+            key: production.get(key, "")
+            for key in (
+                "myanmar_title", "myanmar_story", "audio_url", "audio_status",
+                "audio_required", "processing_status", "processing_error",
+                "content_review_status", "approval_status", "draft_mode",
+            )
+        },
+        "episodes": episodes if isinstance(episodes, list) else [],
+        "quiz": quiz if isinstance(quiz, list) else [],
+        "reflection": reflection,
+    })
+
+
+@app.put("/api/admin/story/<story_id>/rights-review")
+@_admin_api_required
+def admin_api_rights_review(story_id):
+    store = _store()
+    story = next(
+        (row for row in store.read_records("Story Library") if row.get("story_id") == story_id),
+        None,
+    )
+    if story is None:
+        abort(404, "Story Library record does not exist.")
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        abort(400, "A JSON rights-review object is required.")
+
+    category = body.get("category")
+    category_evidence = body.get("category_evidence")
+    license_status = body.get("license_status")
+    rights_cleared = body.get("rights_cleared")
+    human_reviewer = body.get("human_reviewer")
+    license_evidence = body.get("license_evidence")
+    rights_jurisdiction = body.get("rights_jurisdiction")
+    permission_fields = (
+        "permission_for_translation",
+        "permission_for_ai_processing",
+        "permission_for_publication",
+        "permission_for_audio",
+        "permission_for_commercial_use",
+    )
+
+    if not isinstance(category, str) or category not in {
+        "CHILDREN", "ADULT", "UNCLASSIFIED"
+    }:
+        abort(400, "Choose an explicit supported category.")
+    if (
+        not isinstance(category_evidence, str)
+        or len(category_evidence) > 5_000
+        or category in {"CHILDREN", "ADULT"} and not category_evidence.strip()
+    ):
+        abort(400, "Classified stories require category evidence of at most 5,000 characters.")
+    if not isinstance(license_status, str) or license_status not in {
+        "NEEDS_LICENSE_REVIEW", "PENDING_REVIEW", "APPROVED", "REJECTED"
+    }:
+        abort(400, "Unsupported license status.")
+    if not isinstance(rights_cleared, str) or rights_cleared not in {"YES", "NO"}:
+        abort(400, "Rights clearance must be YES or NO.")
+    text_fields = {
+        "human_reviewer": human_reviewer,
+        "license_evidence": license_evidence,
+        "rights_jurisdiction": rights_jurisdiction,
+    }
+    if any(
+        not isinstance(value, str) or len(value) > 5_000
+        for value in text_fields.values()
+    ):
+        abort(400, "Reviewer and rights evidence fields must be text under 5,000 characters.")
+    if any(
+        not isinstance(body.get(field), str) or body[field] not in {"YES", "NO"}
+        for field in permission_fields
+    ):
+        abort(400, "Each rights permission must be explicitly YES or NO.")
+    if rights_cleared == "YES" and not (
+        license_status == "APPROVED"
+        and human_reviewer.strip()
+        and license_evidence.strip()
+        and rights_jurisdiction.strip()
+        and body["permission_for_translation"] == "YES"
+        and body["permission_for_ai_processing"] == "YES"
+    ):
+        abort(
+            409,
+            "Rights clearance requires approved license evidence, reviewer, jurisdiction, "
+            "and explicit translation and AI-processing permission.",
+        )
+
+    updated = {
+        **story,
+        "category": category,
+        "category_evidence": category_evidence.strip(),
+        "license_status": license_status,
+        "rights_cleared": rights_cleared,
+        "human_reviewer": human_reviewer.strip(),
+        "license_evidence": license_evidence.strip(),
+        "rights_jurisdiction": rights_jurisdiction.strip(),
+        "review_status": "REVIEWED",
+        **{field: body[field] for field in permission_fields},
+    }
+    store.upsert_story(updated)
+    return jsonify({
+        "ok": True,
+        "category": updated["category"],
+        "license_status": updated["license_status"],
+        "rights_cleared": updated["rights_cleared"],
+        "review_status": updated["review_status"],
+    })
+
+
+@app.put("/api/admin/story/<story_id>/draft")
+@_admin_api_required
+def admin_api_save_draft(story_id):
+    store = _store()
+    library_story = next(
+        (
+            row for row in store.read_records("Story Library")
+            if row.get("story_id") == story_id
+        ),
+        None,
+    )
+    if not library_story:
+        abort(404)
+    production = next(
+        (row for row in store.read_records("Story Production") if row.get("story_id") == story_id),
+        None,
+    )
+    if production is None:
+        abort(404, "Production draft does not exist.")
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        abort(400, "A JSON draft object is required.")
+    title = body.get("myanmar_title")
+    story_text = body.get("myanmar_story")
+    episodes = body.get("episodes")
+    quiz = body.get("quiz")
+    reflection = body.get("reflection")
+    if not isinstance(title, str) or not title.strip() or len(title) > 500:
+        abort(400, "Myanmar story title is required and must be at most 500 characters.")
+    if (
+        not isinstance(story_text, str)
+        or not story_text.strip()
+        or len(story_text) > 200_000
+    ):
+        abort(400, "Myanmar story text is required and must be at most 200,000 characters.")
+    if not isinstance(episodes, list) or not episodes or len(episodes) > 100:
+        abort(400, "Provide between 1 and 100 ordered episodes.")
+    if any(
+        not isinstance(episode, dict)
+        or type(episode.get("episode_number")) is not int
+        or episode["episode_number"] != index
+        or not isinstance(episode.get("title"), str)
+        or not episode["title"].strip()
+        or not isinstance(episode.get("content"), str)
+        or not episode["content"].strip()
+        or len(episode["content"]) > SHEET_CELL_SAFE_LIMIT
+        for index, episode in enumerate(episodes, 1)
+    ):
+        abort(400, "Episodes must be complete, ordered, titled, and within the safe cell size.")
+    complete_text = " ".join(story_text.split())
+    episode_text = " ".join("".join(item["content"] for item in episodes).split())
+    if complete_text != episode_text:
+        abort(400, "Episode contents must exactly preserve the complete story in order.")
+    if (
+        not isinstance(quiz, list)
+        or not quiz
+        or len(quiz) > 20
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("question"), str)
+            or not item["question"].strip()
+            or not isinstance(item.get("answer"), str)
+            or not item["answer"].strip()
+            for item in quiz
+        )
+    ):
+        abort(400, "Provide at least one quiz item with a question and answer.")
+    if not (
+        isinstance(reflection, str) and reflection.strip()
+        or isinstance(reflection, list)
+        and reflection
+        and all(isinstance(item, str) and item.strip() for item in reflection)
+    ):
+        abort(400, "At least one reflection question is required.")
+    audio_url = body.get("audio_url", "")
+    audio_status = body.get("audio_status", "NOT_READY")
+    if not isinstance(audio_url, str) or not isinstance(audio_status, str):
+        abort(400, "Audio URL and status must be text.")
+    audio_url = audio_url.strip()
+    audio_status = audio_status.strip().upper()
+    if audio_status not in {"NOT_READY", "WAITING_PROVIDER_VERIFICATION", "READY"}:
+        abort(400, "Unsupported audio status.")
+    if audio_url and not (
+        (audio_url.startswith("/") and not audio_url.startswith("//"))
+        or normalize_url(audio_url)
+    ):
+        abort(400, "Audio reference must be a relative URL or HTTP(S) URL.")
+    if audio_status == "READY" and not audio_url:
+        abort(400, "A ready audio asset must have a URL.")
+    if audio_status == "READY" and library_story.get(
+        "permission_for_audio", ""
+    ).strip().upper() != "YES":
+        abort(409, "Explicit audio rights permission is required before marking audio ready.")
+    story_changed = production.get("myanmar_story", "") != story_text
+    production.update({
+        "myanmar_title": title.strip(),
+        "myanmar_story": story_text,
+        "episodes_json": json.dumps(episodes, ensure_ascii=False),
+        "quiz_json": json.dumps(quiz, ensure_ascii=False),
+        "reflection_json": json.dumps(reflection, ensure_ascii=False),
+        "audio_url": "" if story_changed else audio_url,
+        "audio_status": "NOT_READY" if story_changed else audio_status,
+        "content_review_status": "PENDING",
+        "approval_status": "",
+        "processing_status": "HUMAN_EDITING",
+        "processing_error": "",
+    })
+    store.write_production(production)
+    store.write_episodes(story_id, episodes)
+    return jsonify({"ok": True, "processing_status": "HUMAN_EDITING"})
+
+
+@app.post("/api/admin/story/<story_id>/content-review")
+@_admin_api_required
+def admin_api_content_review(story_id):
+    store = _store()
+    production = next(
+        (row for row in store.read_records("Story Production") if row.get("story_id") == story_id),
+        None,
+    )
+    if production is None:
+        abort(404, "Production draft does not exist.")
+    body = request.get_json(silent=True)
+    action = body.get("action") if isinstance(body, dict) else None
+    if action not in {"approve", "reject"}:
+        abort(400, "Choose approve or reject for content review.")
+    if action == "approve":
+        if not production.get("myanmar_title", "").strip() or not production.get("myanmar_story", "").strip():
+            abort(409, "A complete Myanmar title and story are required for review approval.")
+        try:
+            episodes = json.loads(production.get("episodes_json") or "[]")
+            quiz = json.loads(production.get("quiz_json") or "[]")
+            reflection = json.loads(production.get("reflection_json") or "[]")
+        except json.JSONDecodeError:
+            abort(409, "The saved draft contains invalid JSON and requires administrator repair.")
+        if not isinstance(episodes, list) or not episodes:
+            abort(409, "At least one complete episode is required.")
+        if not isinstance(quiz, list) or not quiz or not reflection:
+            abort(409, "Quiz and reflection content must be present.")
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("question"), str)
+            or not item["question"].strip()
+            or not isinstance(item.get("answer"), str)
+            or not item["answer"].strip()
+            for item in quiz
+        ):
+            abort(409, "Quiz items must contain a question and answer.")
+        if not (
+            isinstance(reflection, str) and reflection.strip()
+            or isinstance(reflection, list)
+            and reflection
+            and all(isinstance(item, str) and item.strip() for item in reflection)
+        ):
+            abort(409, "Reflection content must contain a non-empty question.")
+        full_text = " ".join(production["myanmar_story"].split())
+        episode_text = " ".join(
+            "".join(
+                episode.get("content", "")
+                for episode in episodes
+                if isinstance(episode, dict)
+            ).split()
+        )
+        if episode_text != full_text or any(
+            not isinstance(episode, dict)
+            or type(episode.get("episode_number")) is not int
+            or episode["episode_number"] != index
+            or str(episode.get("complete", "YES")).upper() != "YES"
+            for index, episode in enumerate(episodes, 1)
+        ):
+            abort(409, "Episodes must be complete, ordered, and match the full story.")
+    production.update({
+        "content_review_status": "APPROVED" if action == "approve" else "REJECTED",
+        "processing_status": "CONTENT_APPROVED" if action == "approve" else "REJECTED",
+        "approval_status": "",
+        "processing_error": "",
+    })
+    store.write_production(production)
+    store.record_processing({
+        "processing_id": f"{story_id}-review-{uuid.uuid4().hex[:12]}",
+        "story_id": story_id,
+        "status": "CONTENT_APPROVED" if action == "approve" else "CONTENT_REJECTED",
+        "started_at": utc_now(),
+        "completed_at": utc_now(),
+        "retry_count": "0",
+        "error_details": "",
+    })
+    return jsonify({
+        "ok": True,
+        "content_review_status": production["content_review_status"],
+        "publication_approval_required": True,
+    })
 
 @app.post("/admin/logout")
 @_admin_required
@@ -625,12 +1343,24 @@ def public_stories():
             require_audio=draft.get("audio_required", "").upper() == "YES",
         ):
             continue
+        public_episodes = [
+            {
+                **episode,
+                "audio_url": (
+                    episode.get("audio_url", "")
+                    if episode.get("audio_status", "").strip().upper() == "READY"
+                    else ""
+                ),
+            }
+            for episode in episodes
+            if isinstance(episode, dict)
+        ]
         result.append({
             "story_id": record["story_id"],
             "category": record["category"],
             "title": draft.get("myanmar_title", ""),
             "story": draft.get("myanmar_story", ""),
-            "episodes": episodes,
+            "episodes": public_episodes,
             "audio_url": (
                 draft.get("audio_url", "")
                 if draft.get("audio_status", "").upper() == "READY" else ""
