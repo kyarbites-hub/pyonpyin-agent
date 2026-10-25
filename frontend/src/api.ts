@@ -146,13 +146,13 @@ export interface PublicationRecord {
 export interface PublicationSnapshot { title: string; story: string; audio_url: string; episodes: Episode[]; category: string; cover_image_url?: string }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  // Flask နှင့် origin တူသော API ကို session cookie ဖြင့်ခေါ်ပြီး HTTP error ကို UI အတွက် ပြန်ပေးသည်။
+  // Flask API ကို session cookie ဖြင့်ခေါ်ပြီး HTTP error ကို UI အတွက် ပြန်ပေးသည်။
   const headers = new Headers(init?.headers);
   if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const response = await fetch(path, {
-    credentials: "same-origin",
+    credentials: "include",
     ...init,
     headers,
   });

@@ -1422,6 +1422,68 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(logged_out.status_code, 200)
             self.assertEqual(client.get("/api/admin/jobs").status_code, 401)
 
+    def test_admin_login_preflight_allows_only_project_vercel_origins_and_credentials(self):
+        origin = "https://pyonpyin-agent-frontend-c1wksdnc8-kyarbites.vercel.app"
+        with patch.dict(os.environ, {
+            "PYONPYIN_ADMIN_PASSWORD": "offline-test-password",
+            "PYONPYIN_SESSION_SECRET": "offline-test-session-secret",
+            "PYONPYIN_HTTPS": "true",
+        }):
+            client = web_app.app.test_client()
+            preflight = client.options(
+                "/api/admin/login",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type",
+                },
+            )
+            self.assertEqual(preflight.status_code, 200)
+            self.assertEqual(preflight.headers["Access-Control-Allow-Origin"], origin)
+            self.assertEqual(
+                preflight.headers["Access-Control-Allow-Credentials"], "true"
+            )
+            self.assertIn("POST", preflight.headers["Access-Control-Allow-Methods"])
+            self.assertIn("OPTIONS", preflight.headers["Access-Control-Allow-Methods"])
+            self.assertIn("Content-Type", preflight.headers["Access-Control-Allow-Headers"])
+
+            production = client.options(
+                "/api/admin/login",
+                headers={
+                    "Origin": "https://pyonpyin-agent-frontend.vercel.app",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type",
+                },
+            )
+            self.assertEqual(
+                production.headers["Access-Control-Allow-Origin"],
+                "https://pyonpyin-agent-frontend.vercel.app",
+            )
+
+            with patch.dict(web_app.app.config, {
+                "SESSION_COOKIE_SECURE": True,
+                "SESSION_COOKIE_SAMESITE": "None",
+            }):
+                login = client.post(
+                    "/api/admin/login",
+                    json={"password": "offline-test-password"},
+                    headers={"Origin": origin},
+                )
+            self.assertEqual(login.status_code, 200)
+            self.assertEqual(login.headers["Access-Control-Allow-Origin"], origin)
+            self.assertIn("Secure", login.headers["Set-Cookie"])
+            self.assertIn("SameSite=None", login.headers["Set-Cookie"])
+
+            blocked = client.options(
+                "/api/admin/login",
+                headers={
+                    "Origin": "https://untrusted.example",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type",
+                },
+            )
+            self.assertNotIn("Access-Control-Allow-Origin", blocked.headers)
+
     def test_admin_rights_review_requires_explicit_evidence_permissions_and_csrf(self):
         library = {
             "story_id": "pp-rights-review",

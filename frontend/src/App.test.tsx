@@ -281,7 +281,7 @@ describe("PyonPyin frontend", () => {
     fireEvent.click(screen.getByRole("button", { name: /လုံခြုံစွာ ဝင်ရောက်ရန်/ }));
     expect(await screen.findByText("Live API episode")).toBeInTheDocument();
     expect(screen.getByText(/SERVER RECORD/)).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith("/api/admin/story/server-story", expect.objectContaining({ credentials: "same-origin" }));
+    expect(fetchMock).toHaveBeenCalledWith("/api/admin/story/server-story", expect.objectContaining({ credentials: "include" }));
   });
 
   it("saves draft edits to browser-local demo state and keeps review distinct from publishing", async () => {

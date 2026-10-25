@@ -108,7 +108,8 @@ verified without selecting a provider and plan.
 5. Confirm HTTPS, backups, restore procedures, logging, and incident contacts.
 6. Keep publication disabled until the owner explicitly authorizes it and the
    final approval flow is independently tested.
-7. If hosting the React bundle on a separate origin, implement and test
-   credentialed CORS, cookie SameSite/Secure settings, CSRF and origin
-   validation first. Do not assume the current same-origin API client supports
-   that topology.
+7. When hosting the React bundle on a separate origin, use the supported
+   credentialed CORS allowlist for `pyonpyin-agent-frontend` Vercel deployments
+   and set `PYONPYIN_HTTPS=true` on the HTTPS Flask host so session cookies use
+   `SameSite=None; Secure`. Keep CSRF tokens enabled for state-changing API
+   requests; other frontend origins are not allowed.

@@ -38,10 +38,15 @@ FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 app.secret_key = os.environ.get("PYONPYIN_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SAMESITE=(
+        "None" if os.environ.get("PYONPYIN_HTTPS", "").lower() == "true" else "Lax"
+    ),
     SESSION_COOKIE_SECURE=os.environ.get("PYONPYIN_HTTPS", "").lower() == "true",
     PERMANENT_SESSION_LIFETIME=8 * 60 * 60,
     MAX_CONTENT_LENGTH=26 * 1024 * 1024,
+)
+VERCEL_FRONTEND_ORIGIN = re.compile(
+    r"^https://pyonpyin-agent-frontend(?:-[a-z0-9-]+)?\.vercel\.app$"
 )
 
 
@@ -58,6 +63,18 @@ def apply_security_headers(response):
     )
     if os.environ.get("PYONPYIN_HTTPS", "").lower() == "true":
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    if request.path.startswith("/api/"):
+        response.vary.add("Origin")
+        origin = request.headers.get("Origin", "")
+        if VERCEL_FRONTEND_ORIGIN.fullmatch(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = (
+                "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            )
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, X-CSRF-Token"
+            )
     return response
 PUBLIC_HTML = """<!doctype html><html lang="my"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

@@ -6,6 +6,18 @@ afterEach(() => {
 });
 
 describe("admin API CSRF integration", () => {
+  it("includes the Flask session cookie when logging in across origins", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ csrf_token: "csrf" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await api.login("password");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: "include" });
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get("Content-Type"))
+      .toBe("application/json");
+  });
+
   it("uploads multipart audio with CSRF without forcing a JSON content type", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
     vi.stubGlobal("fetch", fetchMock);
