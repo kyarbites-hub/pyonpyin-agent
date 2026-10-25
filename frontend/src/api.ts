@@ -145,23 +145,33 @@ export interface PublicationRecord {
 }
 export interface PublicationSnapshot { title: string; story: string; audio_url: string; episodes: Episode[]; category: string; cover_image_url?: string }
 
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, "");
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // Flask API ကို session cookie ဖြင့်ခေါ်ပြီး HTTP error ကို UI အတွက် ပြန်ပေးသည်။
   const headers = new Headers(init?.headers);
+
   if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(path, {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     credentials: "include",
     ...init,
     headers,
   });
+
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as
       | { error?: string; blockers?: string[] }
       | null;
-    throw new Error([payload?.error || `Request failed (${response.status}).`, ...(payload?.blockers ?? [])].join(" "));
+
+    throw new Error([
+      payload?.error || `Request failed (${response.status}).`,
+      ...(payload?.blockers ?? []),
+    ].join(" "));
   }
+
   return (await response.json()) as T;
 }
 
