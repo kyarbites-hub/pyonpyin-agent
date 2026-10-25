@@ -6,3 +6,22 @@ frontend/.env.*.local
 .env.local
 __pycache__/
 *.py[cod]
+data/runtime/
+data/backups/
+*.db
+*.db-wal
+*.db-shm
+# API keys and credentials
+client_secret.json
+token.json
+credentials.json
+service-account*.json
+
+# Python virtual environments
+.venv/
+venv/
+
+# Local secrets
+secrets/
+*.pem
+*.key

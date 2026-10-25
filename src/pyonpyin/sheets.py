@@ -11,7 +11,9 @@ from googleapiclient.discovery import build
 from pyonpyin.core import utc_now
 
 
+# Google Sheets ကို ဒေတာသိမ်းရာအဖြစ်သုံးပြီး စာရင်း၊ မူကြမ်း၊ စာသား၊ အပိုင်းနှင့် မှတ်တမ်းများ ခွဲထားသည်။
 SHEETS = {
+    "Site Settings": ["setting_id", "image_url", "updated_at"],
     "Story Library": [
         "story_id", "original_title", "author", "source_id", "source_name",
         "source_url", "source_language", "category", "source_text", "source_published_at",
@@ -23,6 +25,7 @@ SHEETS = {
         "permission_for_audio", "permission_for_commercial_use",
         "source_text_segment_count", "human_reviewer", "review_status", "discovery_error",
         "rights_mode", "broad_theme",
+        "original_review_status", "original_reviewer", "original_evidence",
     ],
     "Story Text": [
         "text_key", "story_id", "text_type", "segment_number", "content", "active",
@@ -34,6 +37,8 @@ SHEETS = {
         "audio_required", "processing_status", "processing_error", "updated_at",
         "myanmar_story_segment_count", "episodes_json_segment_count",
         "draft_mode",
+        "episode_partition_rebuilt",
+        "cover_image_url",
     ],
     "Story Episodes": [
         "episode_key", "story_id", "episode_number", "title", "content", "complete",
@@ -42,6 +47,7 @@ SHEETS = {
     "Processing History": [
         "processing_id", "story_id", "status", "started_at", "completed_at",
         "model_name", "retry_count", "error_details",
+        "reviewer",
     ],
     "Publishing History": [
         "publication_id", "story_id", "published_title", "website_url",
@@ -63,6 +69,7 @@ class SheetsStore:
 
     @staticmethod
     def _connect():
+        # Service account ရှိလျှင် ဦးစားပေးပြီး မရှိမှ OAuth token ကို အသုံးပြုသည်။
         service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
         if service_account_json:
             try:
@@ -103,6 +110,7 @@ class SheetsStore:
         return retry_transient(request.execute, attempts=3)
 
     def ensure_schema(self):
+        # ရှိပြီးသားဒေတာ မဖျက်ဘဲ လိုနေသော tab နှင့် column များကိုသာ ဖြည့်တည်ဆောက်သည်။
         spreadsheet = self._execute(self.service.spreadsheets().get(
             spreadsheetId=self.spreadsheet_id,
             fields="sheets.properties(sheetId,title)",
@@ -171,6 +179,8 @@ class SheetsStore:
         return self.upsert_many(sheet_name, key_column, [record])[0]
 
     def upsert_many(self, sheet_name, key_column, records):
+        # Key တူလျှင် ပြင်ပြီး အသစ်ဆိုလျှင် ထပ်ထည့်သည်။ မပို့ထားသော column တန်ဖိုးများကို ထိန်းထားသည်။
+        # ဖတ်ပြီးမှရေးသောနည်းဖြစ်လို့ တစ်ချိန်တည်းရေးသူများကြား transaction lock မဟုတ်ပါ။
         self._check_sheet(sheet_name)
         records_by_key = {}
         for record in records:
@@ -272,6 +282,7 @@ class SheetsStore:
         self.upsert("Story Production", "story_id", story)
 
     def write_text(self, story_id, text_type, text):
+        # စာလုံး ၄၀,၀၀၀ ထက်ရှည်လျှင် cell အကန့်အသတ်အတွက် အပိုင်းခွဲသိမ်းပြီး အဟောင်းပိုများကို ပိတ်သည်။
         if text_type not in {"SOURCE", "MYANMAR", "EPISODES"}:
             raise ValueError("text_type must be SOURCE, MYANMAR, or EPISODES.")
         previous = [
@@ -308,6 +319,7 @@ class SheetsStore:
         return len(segments)
 
     def read_texts(self, text_type):
+        # လက်ရှိအသုံးပြုနေသော စာသားအပိုင်းများကို နံပါတ်စဉ်အတိုင်း ပြန်ဆက်ပေးသည်။
         if text_type not in {"SOURCE", "MYANMAR", "EPISODES"}:
             raise ValueError("text_type must be SOURCE, MYANMAR, or EPISODES.")
         grouped = {}
@@ -340,6 +352,7 @@ class SheetsStore:
         for number, episode in enumerate(episodes, 1):
             previous = existing.get(number, {})
             changed_text = previous.get("content", "") != episode.get("content", "")
+            # စာသားပြောင်းသွားလျှင် အသံအဟောင်း မကိုက်တော့သဖြင့် အသံအဆင်သင့်အခြေအနေကို ပြန်ဖြုတ်သည်။
             records.append({
                 **episode,
                 "story_id": story_id,
@@ -383,6 +396,7 @@ def _column_name(number):
 
 def retry_transient(operation, attempts=3, base_delay=1):
     """Retry only transient Google API status codes, with a strict attempt bound."""
+    # ယာယီ API ပြဿနာများကိုသာ အချိန်ခြားတိုး၍ ပြန်ကြိုးစားပြီး အကန့်အသတ်ရောက်လျှင် error ပြန်ပေးသည်။
     from googleapiclient.errors import HttpError
 
     for attempt in range(attempts):

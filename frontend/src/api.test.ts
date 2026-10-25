@@ -6,6 +6,25 @@ afterEach(() => {
 });
 
 describe("admin API CSRF integration", () => {
+  it("uploads multipart audio with CSRF without forcing a JSON content type", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const file = new File(["sample"], "story.wav", { type: "audio/wav" });
+    await api.uploadAudio("story-1", file, "csrf");
+    const [path, init] = fetchMock.mock.calls[0];
+    expect(path).toBe("/api/admin/story/story-1/audio/upload");
+    expect(init.body).toBeInstanceOf(FormData);
+    expect(new Headers(init.headers).get("Content-Type")).toBeNull();
+    expect(new Headers(init.headers).get("X-CSRF-Token")).toBe("csrf");
+  });
+
+  it("exposes publication blockers from the API to the editor", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 409,
+      json: async () => ({ error: "Publication blocked.", blockers: ["Audio not reviewed."] }),
+    }));
+    await expect(api.storyAction("story-1", "publish", { confirm: true }, "csrf"))
+      .rejects.toThrow("Audio not reviewed.");
+  });
   it("sends the in-memory Flask CSRF token with draft and review mutations", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

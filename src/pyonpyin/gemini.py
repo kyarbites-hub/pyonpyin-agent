@@ -19,7 +19,7 @@ class GeminiError(RuntimeError):
 class GeminiClient:
     def __init__(self, api_key=None, model=None, timeout=40, attempts=2):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        self.model = model or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
+        self.model = model or os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
         self.timeout = timeout
         self.attempts = attempts
         self.retry_count = 0
@@ -27,12 +27,14 @@ class GeminiClient:
             raise RuntimeError("Set GEMINI_API_KEY before generating story drafts.")
 
     def generate_draft(self, story, source_text):
+        # Theme-only မူကြမ်းနှင့် ခွင့်ပြုချက်ရ မူရင်းအခြေခံမူကြမ်းကို ပို့မည့်အချက်အလက်အလိုက် ခွဲစစ်သည်။
         mode = story.get("draft_mode", "RIGHTS_CLEARED_SOURCE").strip().upper()
         category = story.get("category", "").strip().upper()
         if category not in {"CHILDREN", "ADULT"}:
             raise PermissionError("An explicit CHILDREN or ADULT category is required.")
 
         if mode == "ORIGINAL_THEME":
+            # ဤလမ်းကြောင်းတွင် မူရင်းစာသား လုံးဝမပို့ရ။ Audience နှင့် allowlist ထဲက theme ကိုသာ သုံးသည်။
             theme = safe_story_theme(category, story.get("broad_theme", ""))
             if not theme:
                 raise PermissionError("A safe, allowlisted broad theme is required.")
@@ -86,15 +88,20 @@ class GeminiClient:
             raise ValueError(f"Unsupported draft mode: {mode}")
 
         result = self._request(prompt)
+        # AI အဖြေကို တန်းမသိမ်းဘဲ field ပုံစံ၊ အပိုင်းစဉ်၊ စာသားကိုက်ညီမှုနှင့် quiz ကို စစ်ဆေးသည်။
         required = {"title", "story", "episodes", "quiz", "reflection"}
         if not required.issubset(result):
             raise GeminiError("Gemini response is missing required story fields.")
         if (
             not isinstance(result["title"], str)
+            or not result["title"].strip()
             or len(result["title"]) > 500
             or not isinstance(result["story"], str)
+            or not result["story"].strip()
         ):
             raise GeminiError("Gemini title and story must be text.")
+        if len(result["story"]) > MAX_STORY_TEXT_CHARS:
+            raise GeminiError("Gemini story exceeds the configured 200,000-character limit.")
         if not isinstance(result["episodes"], list) or not result["episodes"]:
             raise GeminiError("Gemini must return at least one episode.")
         if len(result["episodes"]) > 100:
@@ -115,7 +122,25 @@ class GeminiClient:
                 raise GeminiError("Gemini returned an invalid or incomplete episode sequence.")
             segments.append(episode["content"])
         if " ".join("".join(segments).split()) != full_text:
-            raise GeminiError("Episode text does not exactly partition the complete draft.")
+            # AI က story နှင့် episode ထဲတွင် စာသားထပ်ရေးရာ၌ ကွာနိုင်သည်။
+            # ပုံပြင်အပြည့်ကို မပြောင်းဘဲ ထိုစာသားမှပဲ အပိုင်းပြန်ခွဲ၍ ပျောက်ဆုံးမှုကို ကာကွယ်သည်။
+            remaining = result["story"]
+            rebuilt = []
+            while remaining:
+                end = min(len(remaining), MAX_EPISODE_TEXT_CHARS)
+                if end < len(remaining):
+                    boundary = max(remaining.rfind(separator, end // 2, end)
+                                   for separator in ("\n", "။", " "))
+                    if boundary >= 0:
+                        end = boundary + 1
+                rebuilt.append({"episode_number": len(rebuilt) + 1,
+                                "title": f"အပိုင်း {len(rebuilt) + 1}", "content": remaining[:end]})
+                remaining = remaining[end:]
+            if any(not episode["content"].strip() for episode in rebuilt):
+                raise GeminiError("Gemini story cannot be partitioned into non-empty episodes.")
+            result["episodes"] = rebuilt
+            result["episode_partition_rebuilt"] = True
+            segments = [episode["content"] for episode in rebuilt]
         if sum(map(len, segments)) > MAX_STORY_TEXT_CHARS:
             raise GeminiError("Gemini story exceeds the configured 200,000-character limit.")
         if not isinstance(result["quiz"], list) or not result["quiz"] or len(result["quiz"]) > 20:
@@ -144,6 +169,7 @@ class GeminiClient:
         return result
 
     def _request(self, prompt):
+        # Gemini ကို server-side key ဖြင့်ခေါ်ပြီး ယာယီအမှားများကိုသာ သတ်မှတ်အကြိမ်အထိ ပြန်ခေါ်သည်။
         endpoint = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.model}:generateContent"

@@ -21,6 +21,7 @@ COPY src/ ./src/
 COPY data/ ./data/
 COPY --from=frontend-build /build/frontend/dist ./frontend/dist
 RUN addgroup --system app && adduser --system --ingroup app app
+RUN mkdir -p /app/data/runtime/audio && chown -R app:app /app/data/runtime
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','8000'),timeout=3).read()"

@@ -1,0 +1,31 @@
+services:
+  web:
+    build: .
+    image: pyonpyin-mvp
+    env_file: .env
+    environment:
+      PYONPYIN_STORAGE: sqlite
+      PYONPYIN_DATABASE_PATH: /app/data/runtime/pyonpyin.db
+      AUDIO_OUTPUT_DIR: /app/data/runtime/audio
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - runtime:/app/data/runtime
+    restart: unless-stopped
+  worker:
+    image: pyonpyin-mvp
+    depends_on:
+      - web
+    env_file: .env
+    environment:
+      PYONPYIN_STORAGE: sqlite
+      PYONPYIN_DATABASE_PATH: /app/data/runtime/pyonpyin.db
+      AUDIO_OUTPUT_DIR: /app/data/runtime/audio
+    command: ["python", "-m", "pyonpyin.worker"]
+    volumes:
+      - runtime:/app/data/runtime
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+volumes:
+  runtime:

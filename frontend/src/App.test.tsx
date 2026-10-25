@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { demoOverview } from "./demo";
 
 afterEach(() => {
   cleanup();
@@ -11,6 +12,95 @@ afterEach(() => {
 });
 
 describe("PyonPyin frontend", () => {
+  it("preserves unsaved live story text while switching between content and optional image steps", async () => {
+    vi.stubEnv("VITE_DEMO_MODE", "false");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      const payload = path === "/api/admin/overview" ? { ...demoOverview, csrf_token: "csrf", stories: [] }
+        : path === "/api/admin/jobs" ? { active: [], history: [], publishing_history: [] }
+        : path === "/api/admin/settings" ? { storage: "sqlite", local_jobs: true }
+        : path === "/api/admin/audio" ? []
+        : path === "/api/admin/story/live-story" ? { story: { original_title: "Live title", category: "CHILDREN" }, production: { draft_mode: "ORIGINAL_THEME", myanmar_title: "Live title", myanmar_story: "Saved story", content_review_status: "PENDING" }, episodes: [{ episode_number: 1, title: "One", content: "Saved story" }], quiz: [], reflection: "" }
+        : [];
+      return { ok: true, json: async () => payload };
+    }));
+    render(<MemoryRouter initialEntries={["/admin/stories/live-story"]}><App /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: /Story Content/ }));
+    fireEvent.change(screen.getByLabelText("မြန်မာပုံပြင်"), { target: { value: "Unsaved edit" } });
+    fireEvent.click(screen.getByRole("button", { name: /Image \(Optional\)/ }));
+    expect(screen.getByLabelText("ပုံဖိုင် ရွေးရန်")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Story Content/ }));
+    expect(screen.getByLabelText("မြန်မာပုံပြင်")).toHaveValue("Unsaved edit");
+  });
+
+  it("shows a failed public request and allows retry instead of staying in loading", async () => {
+    vi.stubEnv("VITE_DEMO_MODE", "false");
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("Temporary outage")).mockResolvedValue({
+      ok: true, json: async () => [],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter initialEntries={["/stories"]}><App /></MemoryRouter>);
+    expect(await screen.findByText("Temporary outage")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "ပြန်ကြိုးစားရန်" }));
+    expect(await screen.findByText("ပုံပြင်များ မရှိသေးပါ")).toBeInTheDocument();
+  });
+
+  it("renders a nonempty production queue without accessing uninitialized story state", async () => {
+    vi.stubEnv("VITE_DEMO_MODE", "true");
+    render(<MemoryRouter initialEntries={["/admin/production"]}><App /></MemoryRouter>);
+    expect(await screen.findByRole("heading", { name: "Story Production queue" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run selected story" })).toBeDisabled();
+  });
+
+  it("creates an original workspace from the live production page and opens its editor", async () => {
+    vi.stubEnv("VITE_DEMO_MODE", "false");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      let payload: unknown = {};
+      if (path === "/api/admin/overview") payload = { ...demoOverview, csrf_token: "live-csrf", stories: [] };
+      else if (path === "/api/admin/jobs") payload = { active: [], history: [], publishing_history: [], dispatch_configured: false };
+      else if (path === "/api/admin/settings") payload = { local_jobs: true, storage: "sqlite" };
+      else if (path === "/api/admin/local-jobs") payload = [];
+      else if (path === "/api/admin/stories") {
+        expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("live-csrf");
+        expect(JSON.parse(String(init?.body)).title).toBe("New original");
+        payload = { story_id: "new-original" };
+      } else if (path === "/api/admin/story/new-original") payload = {
+        story: { original_title: "New original", category: "CHILDREN" },
+        production: { draft_mode: "ORIGINAL_THEME", myanmar_story: "" }, episodes: [], quiz: [], reflection: "",
+      };
+      return { ok: true, json: async () => payload };
+    }));
+    render(<MemoryRouter initialEntries={["/admin/production"]}><App /></MemoryRouter>);
+    fireEvent.change(await screen.findByLabelText("အလုပ်ခေါင်းစဉ်"), { target: { value: "New original" } });
+    fireEvent.click(screen.getByRole("button", { name: "Workspace ဖန်တီးရန်" }));
+    expect(await screen.findByRole("heading", { name: "AI မူကြမ်း စတင်ရန်" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "AI မူကြမ်း job စတင်ရန်" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "ထုတ်ဝေမည်" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("မြန်မာပုံပြင်")).not.toBeInTheDocument();
+  });
+
+  it("explains an unclassified discovery without displaying an unusable editor or generation action", async () => {
+    vi.stubEnv("VITE_DEMO_MODE", "false");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      let payload: unknown = {};
+      if (path === "/api/admin/overview") payload = { ...demoOverview, csrf_token: "csrf", stories: [] };
+      else if (path === "/api/admin/jobs") payload = { active: [], history: [], publishing_history: [], dispatch_configured: false };
+      else if (path === "/api/admin/story/discovered-source") payload = {
+        story: { original_title: "Discovered book", category: "UNCLASSIFIED", source_name: "Standard Ebooks" },
+        production: { processing_status: "", draft_mode: "", myanmar_story: "" },
+        episodes: [], quiz: [], reflection: "",
+      };
+      return { ok: true, json: async () => payload };
+    }));
+    render(<MemoryRouter initialEntries={["/admin/stories/discovered-source"]}><App /></MemoryRouter>);
+    expect(await screen.findByRole("heading", { name: "မူကြမ်း မစတင်ရသေးပါ" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /AI ပုံပြင်အသစ် ဖန်တီးရန်/ })).toHaveAttribute("href", "/admin/production");
+    expect(screen.queryByRole("button", { name: "AI မူကြမ်း job စတင်ရန်" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("မြန်မာပုံပြင်")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "ထုတ်ဝေမည်" })).not.toBeInTheDocument();
+  });
   it("labels admin fixtures as demo data and exposes no publish action", async () => {
     vi.stubEnv("VITE_DEMO_MODE", "true");
     render(<MemoryRouter initialEntries={["/admin"]}><App /></MemoryRouter>);

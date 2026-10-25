@@ -1,5 +1,17 @@
 # Testing and verification
 
+Current MVP additions are covered by `tests/test_mvp.py`, using real temporary
+SQLite databases and mocked providers: original create/review/publish/unpublish,
+quiz/reflection visibility, audio upload/listening review/private/range access,
+atomic queue claims, interrupted-job retry, backup/rollback, long segmented text,
+login throttling, and Azure SSML/PCM output. No external provider is contacted.
+Frontend regressions cover failed-fetch retry, nonempty production rendering,
+workspace creation, multipart CSRF uploads, and publication blockers. CI now runs
+frontend tests/build as well as backend tests.
+
+Use `npm.cmd` in Windows PowerShell if `npm.ps1` is blocked by execution policy.
+Current account/key instructions are in [MVP_SETUP_MM.md](MVP_SETUP_MM.md).
+
 ## Offline tests
 
 From the repository root in PowerShell:

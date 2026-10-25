@@ -209,6 +209,7 @@ export const demoStoryDetail = {
 };
 
 export function isDemoMode(): boolean {
+  // Dev တွင် default demo ဖြစ်သည်။ တကယ့် backend သုံးရန် VITE_DEMO_MODE=false သတ်မှတ်ရသည်။
   return import.meta.env.VITE_DEMO_MODE === "true"
     || (!import.meta.env.VITE_DEMO_MODE && import.meta.env.DEV);
 }
@@ -218,6 +219,7 @@ export function asDemoStory(story: AdminStory): AdminStory {
 }
 
 export function loadDemoStoryDetail(storyId: string): AdminStoryDetail {
+  // Demo ပြင်ဆင်မှုကို ဤ browser ၏ localStorage မှသာ ဖတ်သည်။ Sheets မှ ဖတ်ခြင်းမဟုတ်ပါ။
   const saved = window.localStorage.getItem(`pyonpyin-demo-detail:${storyId}`);
   if (saved) return JSON.parse(saved) as AdminStoryDetail;
   return {
@@ -227,5 +229,6 @@ export function loadDemoStoryDetail(storyId: string): AdminStoryDetail {
 }
 
 export function saveDemoStoryDetail(storyId: string, detail: AdminStoryDetail) {
+  // Demo data ကို browser ထဲမှာပဲ သိမ်းပြီး server သို့ မပို့ပါ။
   window.localStorage.setItem(`pyonpyin-demo-detail:${storyId}`, JSON.stringify(detail));
 }

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 
+# အသက်အုပ်စု မသေချာသောပုံပြင်ကို UNCLASSIFIED အဖြစ်ထားပြီး အလိုအလျောက် မခန့်မှန်းပါ။
 CATEGORIES = {"CHILDREN", "ADULT", "UNCLASSIFIED"}
 SAFE_THEMES = {
     "adventure",
@@ -55,6 +56,7 @@ def normalize_url(raw_url):
 
 def stable_story_id(source_name, source_identifier, source_url):
     """A deterministic identity across discovery reruns and title changes."""
+    # ရင်းမြစ်နဲ့ မူလ ID ကို hash လုပ်ထားလို့ ထပ်ရှာသည့်အခါ ID တူပြီး duplicate စစ်နိုင်သည်။
     stable_key = source_identifier or normalize_url(source_url)
     if not source_name or not stable_key:
         raise ValueError("A source name and source identifier or URL are required.")
@@ -79,6 +81,7 @@ def candidate_category(raw_category):
 
 def safe_story_theme(category, requested_theme=""):
     """Return an allowlisted general idea, never arbitrary feed text."""
+    # မူရင်းစာအုပ်အကြောင်းအရာအစား ခွင့်ပြုထားသော ယေဘုယျအယူအဆကိုသာ AI သို့ပို့ရန် ရွေးသည်။
     audience = (category or "").strip().upper()
     if audience not in {"CHILDREN", "ADULT"}:
         return ""
@@ -90,6 +93,7 @@ def safe_story_theme(category, requested_theme=""):
 
 def eligible_candidate(story):
     """Only exact human-entered clearance permits AI processing."""
+    # မူရင်းစာသားကို AI သုံးခွင့်ရှိမရှိ စစ်သည်။ Theme-only မူကြမ်းအတွက် သီးခြားစည်းမျဉ်းရှိသည်။
     return (
         story.get("category", "").strip().upper() in {"CHILDREN", "ADULT"}
         and story.get("license_status", "").strip().upper() == "APPROVED"
@@ -111,11 +115,24 @@ def valid_audio_reference(value):
     return bool(normalize_url(candidate))
 
 
+def original_reviewed(story):
+    return (
+        story.get("original_review_status", "").strip().upper() == "APPROVED"
+        and bool(story.get("original_reviewer", "").strip())
+        and bool(story.get("original_evidence", "").strip())
+    )
+
+
 def publication_blockers(story, episodes, require_audio=False):
+    # ထုတ်ဝေခွင့်မပြည့်သေးသော အကြောင်းရင်းအားလုံးကို စုပြန်ပေးသည်။ စာဖတ်သူထံပြရာတွင်လည်း ပြန်စစ်သည်။
     blockers = []
     if story.get("category", "").strip().upper() not in {"CHILDREN", "ADULT"}:
         blockers.append("Story category must be explicitly reviewed as CHILDREN or ADULT.")
-    if not eligible_candidate(story):
+    # Original ပုံပြင်ကို မသုံးထားသော source ၏ translation rights မတောင်းဘဲ သီးခြားလူစစ်ချက် တောင်းသည်။
+    is_original = story.get("draft_mode", "").upper() in {"ORIGINAL_THEME", "MANUAL_ORIGINAL"}
+    if is_original and not original_reviewed(story):
+        blockers.append("Original provenance requires explicit human review and evidence.")
+    if not is_original and not eligible_candidate(story):
         blockers.append("Rights are not cleared with evidence, reviewer, and jurisdiction.")
     if story.get("permission_for_publication", "").strip().upper() != "YES":
         blockers.append("Permission for public distribution is not explicitly confirmed.")
@@ -156,6 +173,7 @@ def publication_blockers(story, episodes, require_audio=False):
         if any(str(item.get("complete", "YES")).strip().upper() != "YES" for item in ordered):
             blockers.append("One or more episodes are marked incomplete.")
         if story.get("myanmar_story", "").strip():
+            # အပိုင်းများကို ပြန်ဆက်လျှင် ပုံပြင်အပြည့်နှင့် တူရမည်။ whitespace ကိုသာ ပုံစံညှိစစ်သည်။
             complete_text = " ".join(story["myanmar_story"].split())
             episode_text = " ".join(
                 "".join(

@@ -42,6 +42,13 @@ import {
 import { api, type AdminStory, type AdminStoryDetail, type JobStatus, type Overview, type PublicStory } from "./api";
 import { demoJobs, demoOverview, demoPublicStories, demoTracks, isDemoMode, loadDemoStoryDetail, saveDemoStoryDetail } from "./demo";
 import DemoAudioPlayer from "./DemoAudioPlayer";
+import { LiveFinder, MvpSettings, MvpStoryActions, MvpWorkspace } from "./MvpWorkflow";
+import { LiveAudioStudio, StoryAudioPanel } from "./AudioWorkspace";
+import { PublicationArchive } from "./StoryCatalogue";
+import { ImageManager } from "./ImageManager";
+import { StoryWorld } from "./StoryWorld";
+import { ManagementDashboard } from "./ManagementDashboard";
+import { defaultStoryArt } from "./uiAssets";
 
 const burmeseCategory: Record<string, string> = {
   CHILDREN: "ကလေးများ",
@@ -57,9 +64,9 @@ const adminSections = [
   { id: "production", path: "/admin/production", label: "Story Editor", icon: PenLine },
   { id: "review", path: "/admin/review", label: "Review & Approval", icon: CheckCircle2 },
   { id: "episodes", path: "/admin/episodes", label: "Episode Manager", icon: BookOpen },
-  { id: "audio", path: "/admin/audio", label: "Audio Studio", icon: Music2 },
+  { id: "audio", path: "/admin/audio", label: "အသံနားထောင်ရန်", icon: Music2 },
   { id: "activity", path: "/admin/history", label: "Processing History", icon: History },
-  { id: "publishing", path: "/admin/publishing", label: "Publishing History", icon: FileText },
+  { id: "publishing", path: "/admin/publishing", label: "ထုတ်ဝေမှုမှတ်တမ်း", icon: FileText },
   { id: "settings", path: "/admin/settings", label: "Settings & Safety", icon: Settings2 },
 ];
 
@@ -107,14 +114,15 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
   return <div className="empty-state"><span className="empty-icon"><BookOpen size={24} /></span><h3>{title}</h3><p>{detail}</p></div>;
 }
 
-function StoryCover({ index = 0 }: { index?: number }) {
+function StoryCover({ index = 0, imageUrl }: { index?: number; imageUrl?: string }) {
+  if (imageUrl) return <div className="story-cover"><img className="story-cover-image" src={imageUrl} alt="" loading="lazy" /></div>;
   return <div className={`story-cover cover-${index % 4}`} aria-hidden="true"><span className="cover-orb" /><span className="cover-hill hill-one" /><span className="cover-hill hill-two" /><Sparkles className="cover-star" size={21} /></div>;
 }
 
 function StoryCard({ story, index = 0 }: { story: PublicStory; index?: number }) {
   return (
     <article className="story-card">
-      <StoryCover index={index} />
+      <StoryCover index={index} imageUrl={story.cover_image_url} />
       <div className="story-card-content">
         <div className="card-eyebrow"><span className="category-dot" />{burmeseCategory[story.category]}{story.demo_sample && <span className="sample-chip">DEMO</span>}</div>
         <h3>{story.title}</h3>
@@ -126,6 +134,7 @@ function StoryCard({ story, index = 0 }: { story: PublicStory; index?: number })
 }
 
 function usePublishedStories() {
+  // Demo ဆို fixture ပြပြီး live ဆို publication စစ်ပြီးသော public API ကို ဖတ်သည်။
   const [stories, setStories] = useState<PublicStory[] | null>(null);
   const [error, setError] = useState("");
   const load = async () => {
@@ -146,6 +155,9 @@ function usePublishedStories() {
 
 function HomePage() {
   const { stories, error, reload } = usePublishedStories();
+  const [heroImage, setHeroImage] = useState("");
+  useEffect(() => { if (!isDemoMode()) void api.site().then((site) => setHeroImage(site.hero_image_url)).catch(() => {}); }, []);
+  if (!isDemoMode()) return <StoryWorld stories={stories} error={error} reload={reload} heroImage={heroImage} />;
   return (
     <div className="public-site">
       <SiteHeader />
@@ -158,11 +170,11 @@ function HomePage() {
             <Link className="button button-primary" to="/stories">ပုံပြင်များ ရှာဖွေရန် <ArrowRight size={17} /></Link>
             <div className="hero-proof"><ShieldCheck size={17} /><span>{isDemoMode() ? "DEMO နမူနာအကြောင်းအရာ · ထုတ်ဝေထားသော ပုံပြင်မဟုတ်ပါ" : "စစ်ဆေးပြီး ထုတ်ဝေထားသော ပုံပြင်များသာ"}</span></div>
           </div>
-          <div className="hero-art" aria-hidden="true"><div className="hero-moon" /><div className="hero-planet">✦</div><div className="hero-mountain mountain-back" /><div className="hero-mountain mountain-front" /><div className="hero-caption">ပုံပြင်တစ်ပုဒ် · ကမ္ဘာတစ်ခု</div></div>
+          <div className="hero-art" aria-hidden="true">{heroImage ? <img className="hero-custom-image" src={heroImage} alt="" /> : <><div className="hero-moon" /><div className="hero-planet">✦</div><div className="hero-mountain mountain-back" /><div className="hero-mountain mountain-front" /></>}<div className="hero-caption">ပုံပြင်တစ်ပုဒ် · ကမ္ဘာတစ်ခု</div></div>
         </section>
         <section className="section-block">
           <div className="section-heading"><div><span className="eyebrow">DISCOVER</span><h2>ပုံပြင်အသစ်များ</h2><p>{isDemoMode() ? "နမူနာအကြောင်းအရာများ · အများမြင်ထုတ်ဝေမှု မဟုတ်ပါ" : "အတည်ပြုပြီး မျှဝေထားသော ပုံပြင်များ"}</p></div><Link to="/stories" className="text-link">အားလုံးကြည့်ရန် <ArrowRight size={16} /></Link></div>
-          {stories === null ? <LoadingState /> : error ? <ErrorState message={error} retry={() => void reload()} /> : stories.length === 0 ? <EmptyState title="ပုံပြင်များ မရှိသေးပါ" detail="စစ်ဆေးပြီး ထုတ်ဝေထားသော ပုံပြင်အသစ်များ မကြာမီ ရောက်လာပါမည်။" /> : <div className="story-grid">{stories.slice(0, 3).map((story, index) => <StoryCard key={story.story_id} story={story} index={index} />)}</div>}
+          {error ? <ErrorState message={error} retry={() => void reload()} /> : stories === null ? <LoadingState /> : stories.length === 0 ? <EmptyState title="ပုံပြင်များ မရှိသေးပါ" detail="စစ်ဆေးပြီး ထုတ်ဝေထားသော ပုံပြင်အသစ်များ မကြာမီ ရောက်လာပါမည်။" /> : <div className="story-grid">{stories.slice(0, 3).map((story, index) => <StoryCard key={story.story_id} story={story} index={index} />)}</div>}
         </section>
         <section className="reader-note"><div className="reader-note-icon"><BookOpen size={24} /></div><div><span className="eyebrow">READ AT YOUR OWN PACE</span><h2>စာမျက်နှာတိုင်းမှာ စိတ်ကူးအသစ်</h2><p>ဖုန်း၊ တက်ဘလက်နှင့် ကွန်ပျူတာများတွင် သက်တောင့်သက်သာ ဖတ်ရှုနိုင်ပါသည်။</p></div><ArrowDownRight className="note-arrow" size={34} /></section>
       </main>
@@ -172,6 +184,7 @@ function HomePage() {
 }
 
 function LibraryPage() {
+  // ရယူထားသော ပုံပြင်များကို browser ထဲမှာ စာသားနှင့် category အလိုက် စစ်ထုတ်ပြသည်။
   const { stories, error, reload } = usePublishedStories();
   const [params, setParams] = useSearchParams();
   const query = params.get("q") ?? "";
@@ -185,13 +198,14 @@ function LibraryPage() {
     if (!value || value === "ALL") next.delete(key); else next.set(key, value);
     setParams(next);
   };
+  if (!isDemoMode()) return <StoryWorld stories={stories} error={error} reload={reload} mode="library" />;
   return (
     <div className="public-site">
       <SiteHeader />
       <main className="page-main">
         <section className="page-intro"><span className="eyebrow">THE COLLECTION</span><h1>ပုံပြင်စာကြည့်တိုက်</h1><p>သင့်စိတ်ကြိုက် ပုံပြင်များကို ရှာဖွေဖတ်ရှုပါ။</p>{isDemoMode() && <span className="public-demo-banner"><CircleHelp size={15} /> DEMO နမူနာများသာ · အများမြင်ထုတ်ဝေထားသော ဇာတ်လမ်းများ မဟုတ်ပါ</span>}</section>
         <div className="library-controls"><label className="search-field"><Search size={18} /><input aria-label="ပုံပြင်ရှာရန်" placeholder="ခေါင်းစဉ် သို့မဟုတ် စာသားဖြင့် ရှာရန်…" value={query} onChange={(event) => updateParams("q", event.target.value)} /></label><div className="filter-pills" aria-label="အမျိုးအစား စစ်ထုတ်ရန်">{[["ALL", "အားလုံး"], ["CHILDREN", "ကလေးများ"], ["ADULT", "လူကြီးများ"]].map(([value, label]) => <button key={value} className={`filter-pill ${category === value ? "selected" : ""}`} onClick={() => updateParams("category", value)}>{label}</button>)}</div></div>
-        {stories === null ? <LoadingState /> : error ? <ErrorState message={error} retry={() => void reload()} /> : filtered.length === 0 ? <EmptyState title={stories.length === 0 ? "ပုံပြင်များ မရှိသေးပါ" : "ကိုက်ညီသော ပုံပြင် မရှိပါ"} detail={stories.length === 0 ? "စစ်ဆေးပြီး ထုတ်ဝေထားသော ပုံပြင်အသစ်များ မကြာမီ ရောက်လာပါမည်။" : "ရှာဖွေမှု သို့မဟုတ် အမျိုးအစားကို ပြောင်းကြည့်ပါ။"} /> : <div className="story-grid">{filtered.map((story, index) => <StoryCard key={story.story_id} story={story} index={index} />)}</div>}
+        {error ? <ErrorState message={error} retry={() => void reload()} /> : stories === null ? <LoadingState /> : filtered.length === 0 ? <EmptyState title={stories.length === 0 ? "ပုံပြင်များ မရှိသေးပါ" : "ကိုက်ညီသော ပုံပြင် မရှိပါ"} detail={stories.length === 0 ? "စစ်ဆေးပြီး ထုတ်ဝေထားသော ပုံပြင်အသစ်များ မကြာမီ ရောက်လာပါမည်။" : "ရှာဖွေမှု သို့မဟုတ် အမျိုးအစားကို ပြောင်းကြည့်ပါ။"} /> : <div className="story-grid">{filtered.map((story, index) => <StoryCard key={story.story_id} story={story} index={index} />)}</div>}
       </main>
       <SiteFooter />
     </div>
@@ -203,14 +217,16 @@ function StoryPage() {
   const navigate = useNavigate();
   const { stories, error, reload } = usePublishedStories();
   const story = stories?.find((item) => item.story_id === storyId);
+  if (!isDemoMode()) return <StoryWorld stories={stories} error={error} reload={reload} mode="story" storyId={storyId} />;
   return (
     <div className="public-site">
       <SiteHeader />
       <main className="page-main story-page">
         <button className="back-link" onClick={() => navigate(-1)}>← ပုံပြင်စာကြည့်တိုက်သို့</button>
-        {stories === null ? <LoadingState /> : error ? <ErrorState message={error} retry={() => void reload()} /> : !story ? <EmptyState title="ပုံပြင်ကို ရှာမတွေ့ပါ" detail="ဤပုံပြင်ကို ထုတ်ဝေထားခြင်း မရှိတော့ပါ။" /> : <article className="story-reading">
+        {error ? <ErrorState message={error} retry={() => void reload()} /> : stories === null ? <LoadingState /> : !story ? <EmptyState title="ပုံပြင်ကို ရှာမတွေ့ပါ" detail="ဤပုံပြင်ကို ထုတ်ဝေထားခြင်း မရှိတော့ပါ။" /> : <article className="story-reading">
           <div className="reading-top"><span className="category-chip">{burmeseCategory[story.category]}</span><span className="reading-mark"><BookOpen size={17} /> {story.demo_sample ? "DEMO SAMPLE · NOT PUBLISHED" : "PYONPYIN STORY"}</span></div>
           <h1>{story.title}</h1>
+          {story.cover_image_url && <img className="reading-cover-image" src={story.cover_image_url} alt={`${story.title} မျက်နှာဖုံးပုံ`} />}
           {story.demo_sample && <div className="public-demo-banner"><CircleHelp size={15} /> သရုပ်ပြရန် ဖန်တီးထားသော နမူနာသာဖြစ်ပြီး rights review မပြီးသေးပါ</div>}
           {story.audio_url && <audio className="story-audio" controls preload="none" src={story.audio_url} aria-label="ပုံပြင်အသံဖိုင်" />}
           {!story.audio_url && story.demo_sample && <DemoAudioPlayer compact title={`${story.title} · sound UI preview`} frequency={196} />}
@@ -248,6 +264,7 @@ function AdminLogin({ onLogin }: { onLogin: (token: string) => void }) {
 }
 
 function AdminPage() {
+  // Admin စာမျက်နှာများ၏ session၊ CSRF၊ စာရင်းအနှစ်ချုပ်နှင့် sidebar လမ်းကြောင်းကို စီမံသည်။
   const location = useLocation();
   const navigate = useNavigate();
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -332,30 +349,35 @@ function AdminPage() {
   const pages = Math.max(1, Math.ceil(visibleStories.length / pageSize));
   const pagedStories = visibleStories.slice(page * pageSize, (page + 1) * pageSize);
   const sections = adminSections;
+  const mainSectionIds = ["overview", "finder", "library", "audio", "publishing", "settings"];
+  const displaySectionNames: Record<string, string> = { overview: "Dashboard", finder: "Story Finder", library: "Stories", audio: "Audio Library", publishing: "Published Stories", settings: "Settings" };
+  const navigationItem = ({ id, path, label, icon: Icon }: typeof adminSections[number]) => <button key={id} className={`sidebar-item ${section === id || (id === "library" && section === "editor") ? "active" : ""}`} onClick={() => navigate(path)} title={collapsed ? label : undefined}><Icon size={18} /><span>{!isDemoMode() ? displaySectionNames[id] || label : label}</span>{id === "library" && <small>{data?.counts.stories ?? 0}</small>}</button>;
   const renderStoriesTable = (rows: AdminStory[]) => rows.length === 0
     ? <EmptyState title="ပုံပြင်မရှိသေးပါ" detail="ရွေးချယ်ထားသော စစ်ထုတ်မှုနှင့် ကိုက်ညီသည့် မှတ်တမ်း မရှိပါ။" />
     : <div className="table-scroll"><table><thead><tr><th>ပုံပြင်</th><th>အမျိုးအစား</th><th>အခွင့်အရေး</th><th>စစ်ဆေးမှု</th><th>ထုတ်လုပ်မှု</th><th /></tr></thead><tbody>{rows.map((story) => <StoryRow key={story.story_id} story={story} onSelect={() => setSelectedStory(story)} />)}</tbody></table></div>;
   return (
     <div className={`admin-shell ${collapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="admin-sidebar">
-        <Link className="brand admin-brand" to="/"><span className="brand-mark"><Sparkles size={20} /></span><span className="brand-word"><strong>PYONPYIN</strong><small>AI STORY STUDIO</small></span></Link>
+        <Link className="brand admin-brand" to="/"><span className="brand-mark"><BookOpen size={29} /></span><span className="brand-word"><strong>PyonPyin</strong><small>Auto Story Project</small></span></Link>
         <div className="sidebar-label">WORKSPACE</div>
         <nav className="sidebar-nav" aria-label="စီမံခန့်ခွဲမှု">
-          {sections.map(({ id, path, label, icon: Icon }) => <button key={id} className={`sidebar-item ${section === id || (id === "library" && section === "editor") ? "active" : ""}`} onClick={() => navigate(path)} title={collapsed ? label : undefined}><Icon size={17} /><span>{label}</span>{id === "library" && <small>{data?.counts.stories ?? 0}</small>}</button>)}
+          {(isDemoMode() ? sections : sections.filter((item) => mainSectionIds.includes(item.id))).map(navigationItem)}
+          {!isDemoMode() && <details className="admin-advanced-nav" open={!mainSectionIds.includes(section) && section !== "editor"}><summary>လုပ်ငန်းစဉ် အသေးစိတ်</summary>{sections.filter((item) => !mainSectionIds.includes(item.id)).map(navigationItem)}</details>}
         </nav>
         <div className="sidebar-spacer" />
-        <div className="sidebar-safety"><span className="safety-icon"><ShieldCheck size={17} /></span><div><strong>လုံခြုံမှု အခြေအနေ</strong><small>ထုတ်ဝေမှု ပိတ်ထားသည်</small></div><span className="safety-dot" /></div>
+        <div className="sidebar-safety"><span className="safety-icon"><ShieldCheck size={17} /></span><div><strong>လုံခြုံမှု အခြေအနေ</strong><small>{isDemoMode() ? "ထုတ်ဝေမှု ပိတ်ထားသည်" : "ထုတ်ဝေမှုအတွက် Settings ကိုစစ်ပါ"}</small></div><span className="safety-dot" /></div>
         <button className="collapse-button" onClick={() => setCollapsed(!collapsed)}><ChevronLeft size={16} /><span>ဘေးမီနူး ခေါက်ရန်</span></button>
       </aside>
       <div className="admin-workspace">
         <header className="admin-topbar"><div className="topbar-left"><button className="icon-button menu-toggle" onClick={() => setCollapsed(!collapsed)} aria-label="ဘေးမီနူး ဖွင့်ပိတ်"><Menu size={18} /></button><span className="breadcrumb">PYONPYIN <span>/</span> {sections.find((item) => item.id === section)?.label ?? "Story Editor"}</span></div><div className="admin-header-actions">{isDemoMode() && <span className="demo-badge"><span /> DEMO DATA · နမူနာ</span>}{!isDemoMode() && <button className="icon-button" onClick={() => void load()} aria-label="ပြန်လည်ဖတ်ရှုရန်"><Compass size={18} /></button>}<Link className="admin-site-link" to="/">ပုံပြင်ဝဘ်ဆိုက် <ArrowRight size={14} /></Link>{!isDemoMode() && <button className="icon-button" onClick={() => void logout()} disabled={busy} aria-label="ထွက်ရန်"><LogOut size={18} /></button>}</div></header>
         <main className="admin-main">
-          <div className="admin-title-row"><div><span className="eyebrow">CONTROL CENTER · {new Date().toLocaleDateString("my-MM")}</span><h1>{sections.find((item) => item.id === section)?.label}</h1><p>ပုံပြင်လုပ်ငန်းစဉ်များကို လုံခြုံစွာ စီမံကြည့်ရှုပါ။</p></div><div className="admin-title-icon"><LayoutDashboard size={23} /></div></div>
+          <div className="admin-title-row"><div><span className="eyebrow">CONTROL CENTER · {new Date().toLocaleDateString("my-MM")}</span><h1>{!isDemoMode() ? displaySectionNames[section] || sections.find((item) => item.id === section)?.label : sections.find((item) => item.id === section)?.label}</h1><p>PyonPyin Auto Story Project · Story Management Center</p></div><div className="admin-title-icon"><LayoutDashboard size={23} /></div></div>
           {isDemoMode() && <div className="demo-notice"><CircleHelp size={18} /><span><strong>Demo preview — နမူနာဒေတာသာ ဖြစ်သည်။</strong> ဤအချက်အလက်များသည် Google Sheets မှ မဟုတ်သလို အမှန်တကယ် ထုတ်ဝေထားသော ပုံပြင်များ မဟုတ်ပါ။</span></div>}
           {notice && <div className="toast-note" role="status"><CheckCircle2 size={17} />{notice}</div>}
           {error && <ErrorState message={error} retry={() => void load()} />}
           {data ? <div className="section-transition" key={section}>
-            {section === "overview" && <>
+            {section === "overview" && !isDemoMode() && <ManagementDashboard counts={data.counts} stories={data.stories} jobs={jobData} />}
+            {section === "overview" && isDemoMode() && <>
               <section className="metrics-grid" aria-label="အနှစ်ချုပ်">
                 <Metric icon={<LibraryBig />} label="ပုံပြင်ရှာဖွေတွေ့ရှိမှု" count={data.counts.stories} color="blue" />
                 <Metric icon={<Clock3 />} label="အခွင့်အရေး စစ်ဆေးရန်" count={data.counts.rights_review} color="amber" />
@@ -372,17 +394,18 @@ function AdminPage() {
               <section className="admin-panel"><div className="panel-heading"><div><span className="eyebrow">RECENT STORIES</span><h2>နောက်ဆုံး လုပ်ဆောင်မှု</h2></div><button className="small-link" onClick={() => navigate("/admin/stories")}>စာကြည့်တိုက် <ArrowRight size={13} /></button></div>{renderStoriesTable(data.stories.slice(0, 5))}</section>
               {jobData && <section className="admin-panel jobs-panel"><JobTimeline jobs={jobData} /></section>}
             </>}
-            {section === "finder" && <FinderStudio />}
+            {section === "finder" && (isDemoMode() ? <FinderStudio /> : <LiveFinder csrf={csrf} onUpdated={() => { void load(); }} />)}
             {section === "library" && <section className="admin-panel library-panel"><div className="panel-heading"><div><span className="eyebrow">STORY LIBRARY</span><h2>ရင်းမြစ်နှင့် အခွင့်အရေး စစ်ဆေးမှု</h2></div><span className="panel-count">{visibleStories.length} ခု</span></div><div className="library-toolbar"><label className="search-field"><Search size={17} /><input aria-label="စီမံခန့်ခွဲမှု ပုံပြင်ရှာရန်" placeholder="ခေါင်းစဉ်၊ ID သို့မဟုတ် ရင်းမြစ်…" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} /></label><select aria-label="အခြေအနေ စစ်ထုတ်ရန်" value={filter} onChange={(event) => { setFilter(event.target.value); setPage(0); }}><option value="ALL">အခြေအနေအားလုံး</option><option value="RIGHTS_REVIEW">အခွင့်အရေး စစ်ဆေးရန်</option><option value="QUEUED">တန်းစီနေသည်</option><option value="DRAFT">မူကြမ်းရှိသည်</option></select><select aria-label="စီစဉ်ရန်" value={sort} onChange={(event) => setSort(event.target.value)}><option value="recent">ID အလိုက်</option><option value="title">ခေါင်းစဉ်အလိုက်</option><option value="status">အခြေအနေအလိုက်</option></select></div>{renderStoriesTable(pagedStories)}<div className="pagination"><span>{visibleStories.length ? `${page * pageSize + 1}–${Math.min((page + 1) * pageSize, visibleStories.length)} / ${visibleStories.length}` : "မှတ်တမ်း မရှိပါ"}</span><div><button className="icon-button" aria-label="ယခင်စာမျက်နှာ" disabled={page === 0} onClick={() => setPage(Math.max(0, page - 1))}><ChevronLeft size={16} /></button><span>{page + 1} / {pages}</span><button className="icon-button" aria-label="နောက်စာမျက်နှာ" disabled={page + 1 >= pages} onClick={() => setPage(Math.min(pages - 1, page + 1))}><ChevronRight size={16} /></button></div></div></section>}
             {section === "rights" && <RightsReview stories={data.stories} csrfToken={csrf} onUpdated={() => { void load(); }} />}
-            {section === "production" && <><ProductionQueue stories={data.stories} jobs={jobData} csrfToken={csrf} onUpdated={() => { void load(); }} />{jobData && <section className="admin-panel"><JobTimeline jobs={jobData} /></section>}</>}
+            {section === "production" && <>{!isDemoMode() && <MvpWorkspace csrf={csrf} onUpdated={() => { void load(); }} onOpen={(id) => navigate(`/admin/stories/${id}`)} />}{!jobData?.local_jobs && <ProductionQueue stories={data.stories} jobs={jobData} csrfToken={csrf} onUpdated={() => { void load(); }} />}{jobData && <section className="admin-panel"><JobTimeline jobs={jobData} /></section>}</>}
             {section === "editor" && <StoryEditor storyId={editorStoryId} csrfToken={csrf} onClose={() => navigate("/admin/stories")} onUpdated={() => { void load(); }} />}
             {section === "review" && <ReviewWorkspace stories={data.stories} onOpen={(id) => navigate(`/admin/stories/${encodeURIComponent(id)}`)} />}
             {section === "episodes" && <EpisodeWorkspace stories={data.stories} onOpen={(id) => navigate(`/admin/stories/${encodeURIComponent(id)}`)} />}
-            {section === "audio" && <AudioStudio onNotice={setNotice} />}
+            {section === "audio" && (isDemoMode() ? <AudioStudio onNotice={setNotice} /> : <LiveAudioStudio />)}
             {section === "activity" && <section className="admin-panel"><JobTimeline jobs={jobData ?? demoJobs} expanded /></section>}
-            {section === "publishing" && <section className="admin-panel"><div className="panel-heading"><div><span className="eyebrow">PUBLICATION AUDIT</span><h2>ထုတ်ဝေမှုမှတ်တမ်း</h2></div><StatusBadge value="PUBLISHING_DISABLED" /></div>{jobData?.publishing_history.length ? <div className="history-list">{jobData.publishing_history.map((item, index) => <div className="history-row" key={`${item.story_id}-${index}`}><span>{item.published_title || item.story_id}</span><StatusBadge value={item.publication_status} /><small>{item.published_at} · {item.approved_by}</small></div>)}</div> : <EmptyState title="ထုတ်ဝေမှုမှတ်တမ်း မရှိသေးပါ" detail="အတည်ပြုထားသော ထုတ်ဝေမှုမှတ်တမ်းများကို ဤနေရာတွင်သာ ဖတ်ရှုနိုင်ပါသည်။" />}</section>}
-            {section === "settings" && <><section className="admin-panel settings-panel"><div className="panel-heading"><div><span className="eyebrow">PLATFORM SAFETY</span><h2>လုံခြုံရေးနှင့် ထုတ်ဝေမှု</h2></div><ShieldCheck size={20} /></div><div className="setting-row"><div><strong>အလိုအလျောက် ထုတ်ဝေမှု</strong><p>လူသား၏ အတည်ပြုချက် မပါဘဲ ပုံပြင် မထုတ်ဝေပါ။</p></div><StatusBadge value="DISABLED" /></div><div className="setting-row"><div><strong>AI job ကို ဤမျက်နှာပြင်မှ စတင်ခြင်း</strong><p>Agent job dispatch ကို မချိတ်ဆက်ရသေးပါ။ လက်ရှိတွင် status များကိုသာ ကြည့်နိုင်ပါသည်။</p></div><StatusBadge value="NOT_CONFIGURED" /></div><div className="setting-row"><div><strong>အမျိုးအစား သတ်မှတ်ချက်</strong><p>ကလေး/လူကြီး အမျိုးအစားကို အထောက်အထားမရှိဘဲ မခန့်မှန်းပါ။</p></div><StatusBadge value="HUMAN_REVIEW" /></div><div className="setting-row"><div><strong>လျှို့ဝှက်ချက်များ</strong><p>Google၊ Gemini နှင့် GitHub credentials များကို server-side environment တွင်သာ ထားပါသည်။</p></div><StatusBadge value="SERVER_ONLY" /></div></section><section className="admin-panel"><div className="panel-heading"><div><span className="eyebrow">AUDIO PROVIDER</span><h2>မြန်မာအသံဖိုင်</h2></div><AudioLines size={18} /></div><p className="panel-description">လက်ရှိတွင် အတည်ပြုပြီးသော မြန်မာ TTS voice မရှိသေးပါ။ အသံဖိုင်များကို READY အဖြစ် အလိုအလျောက် မမှတ်သားပါ။</p></section></>}
+            {section === "publishing" && !isDemoMode() && <PublicationArchive stories={data.stories} />}
+            {section === "publishing" && isDemoMode() && <section className="admin-panel"><div className="panel-heading"><div><span className="eyebrow">PUBLICATION AUDIT</span><h2>ထုတ်ဝေမှုမှတ်တမ်း</h2></div><StatusBadge value={isDemoMode() ? "PUBLISHING_DISABLED" : "HUMAN_APPROVAL_REQUIRED"} /></div>{jobData?.publishing_history.length ? <div className="history-list">{jobData.publishing_history.map((item, index) => <div className="history-row" key={`${item.story_id}-${index}`}><span>{item.published_title || item.story_id}</span><StatusBadge value={item.publication_status} /><small>{item.published_at} · {item.approved_by}</small></div>)}</div> : <EmptyState title="ထုတ်ဝေမှုမှတ်တမ်း မရှိသေးပါ" detail="အတည်ပြုထားသော ထုတ်ဝေမှုမှတ်တမ်းများကို ဤနေရာတွင်သာ ဖတ်ရှုနိုင်ပါသည်။" />}</section>}
+            {section === "settings" && !isDemoMode() && <><ImageManager csrf={csrf} /><MvpSettings /></>}{section === "settings" && isDemoMode() && <><section className="admin-panel settings-panel"><div className="panel-heading"><div><span className="eyebrow">PLATFORM SAFETY</span><h2>လုံခြုံရေးနှင့် ထုတ်ဝေမှု</h2></div><ShieldCheck size={20} /></div><div className="setting-row"><div><strong>အလိုအလျောက် ထုတ်ဝေမှု</strong><p>လူသား၏ အတည်ပြုချက် မပါဘဲ ပုံပြင် မထုတ်ဝေပါ။</p></div><StatusBadge value="DISABLED" /></div><div className="setting-row"><div><strong>AI job ကို ဤမျက်နှာပြင်မှ စတင်ခြင်း</strong><p>Agent job dispatch ကို မချိတ်ဆက်ရသေးပါ။ လက်ရှိတွင် status များကိုသာ ကြည့်နိုင်ပါသည်။</p></div><StatusBadge value="NOT_CONFIGURED" /></div><div className="setting-row"><div><strong>အမျိုးအစား သတ်မှတ်ချက်</strong><p>ကလေး/လူကြီး အမျိုးအစားကို အထောက်အထားမရှိဘဲ မခန့်မှန်းပါ။</p></div><StatusBadge value="HUMAN_REVIEW" /></div><div className="setting-row"><div><strong>လျှို့ဝှက်ချက်များ</strong><p>Google၊ Gemini နှင့် GitHub credentials များကို server-side environment တွင်သာ ထားပါသည်။</p></div><StatusBadge value="SERVER_ONLY" /></div></section><section className="admin-panel"><div className="panel-heading"><div><span className="eyebrow">AUDIO PROVIDER</span><h2>မြန်မာအသံဖိုင်</h2></div><AudioLines size={18} /></div><p className="panel-description">လက်ရှိတွင် အတည်ပြုပြီးသော မြန်မာ TTS voice မရှိသေးပါ။ အသံဖိုင်များကို READY အဖြစ် အလိုအလျောက် မမှတ်သားပါ။</p></section></>}
           </div> : error ? null : <LoadingState />}
         </main>
         <footer className="admin-footer"><span>PYONPYIN AI · ADMIN WORKSPACE</span><span>အတည်ပြုမှု မရှိလျှင် ထုတ်ဝေမှု မပြုပါ</span></footer>
@@ -393,6 +416,7 @@ function AdminPage() {
 }
 
 function FinderStudio() {
+  // လက်ရှိ demo scan သာဖြစ်ပြီး တကယ့် feed သို့မဟုတ် discovery job ကို မခေါ်သေးပါ။
   const [checked, setChecked] = useState(false);
   const [message, setMessage] = useState("");
   return <div className="admin-subpages">
@@ -425,6 +449,7 @@ function RightsReview({ stories, csrfToken, onUpdated }: { stories: AdminStory[]
 }
 
 function RightsReviewForm({ story, csrfToken, onUpdated }: { story: AdminStory; csrfToken: string; onUpdated: () => void }) {
+  // ပုံပြင်တစ်ပုဒ်စီ၏ အသက်အုပ်စုနှင့် အသုံးပြုခွင့်ဆိုင်ရာ လူစစ်ချက်ကို သိမ်းပေးသော form ဖြစ်သည်။
   const [draft, setDraft] = useState({
     category: story.category || "UNCLASSIFIED",
     category_evidence: story.category_evidence || "",
@@ -501,7 +526,7 @@ function ReviewWorkspace({ stories, onOpen }: { stories: AdminStory[]; onOpen: (
     setMessage(`DEMO · Content review marked ${action.toLowerCase()} in this browser only. No publication approval was granted.`);
   };
   return <div className="admin-subpages">
-    <section className="admin-panel"><div className="panel-heading"><div><span className="eyebrow">HUMAN REVIEW WORKSPACE</span><h2>Draft review queue</h2><p className="panel-description">Demo content approval is separate from rights clearance and publication approval.</p></div><StatusBadge value="PUBLISHING_DISABLED" /></div>{message && <div className="toast-note" role="status"><CheckCircle2 size={16} />{message}</div>}
+    <section className="admin-panel"><div className="panel-heading"><div><span className="eyebrow">HUMAN REVIEW WORKSPACE</span><h2>Draft review queue</h2><p className="panel-description">Demo content approval is separate from rights clearance and publication approval.</p></div><StatusBadge value={isDemoMode() ? "PUBLISHING_DISABLED" : "HUMAN_APPROVAL_REQUIRED"} /></div>{message && <div className="toast-note" role="status"><CheckCircle2 size={16} />{message}</div>}
       <div className="review-cards">{stories.filter((story) => story.processing_status === "DRAFT_READY" || story.processing_status === "HUMAN_EDITING" || story.processing_status === "QUEUED").map((story) => <article className="review-card" key={story.story_id}><div className="review-card-top"><span className="eyebrow">{demoMode ? "DEMO DRAFT" : "SERVER DRAFT"} · {story.story_id}</span><StatusBadge value={decisions[story.story_id] ?? story.processing_status} /></div><h3>{story.title}</h3><p>Rights: {story.license_status} · Audience: {story.category}</p><div className="review-action-row"><button className="button button-quiet" onClick={() => onOpen(story.story_id)}><PenLine size={15} /> Review draft</button>{demoMode && <><button className="button button-review" onClick={() => decide(story.story_id, "APPROVED")}><CheckCircle2 size={15} /> Demo approve content</button><button className="button button-reject" onClick={() => decide(story.story_id, "REJECTED")}><XCircle size={15} /> Demo reject</button></>}</div><small>{demoMode ? "Browser-only content decision · not rights approval · never publishes" : "Use the authenticated editor for content review. Rights clearance remains separate."}</small></article>)}</div>
       {!stories.some((story) => ["DRAFT_READY", "HUMAN_EDITING", "QUEUED"].includes(story.processing_status)) && <EmptyState title="Review queue is clear" detail="New drafts will appear here after a production run." />}
     </section>
@@ -575,11 +600,12 @@ function ProductionQueue({ stories, jobs, csrfToken, onUpdated }: {
   csrfToken: string;
   onUpdated: () => void;
 }) {
+  // QUEUED ပုံပြင်ကိုရွေး၍ server-side GitHub dispatch ခေါ်ရန်ဖြစ်ပြီး configuration လိုသည်။
   const queuedStories = stories.filter((story) => story.processing_status === "QUEUED");
+  const [storyId, setStoryId] = useState(queuedStories[0]?.story_id ?? "");
   const anotherJobActive = stories.some((story) =>
     story.story_id !== storyId && ["DISPATCHED", "GENERATING"].includes(story.processing_status),
   );
-  const [storyId, setStoryId] = useState(queuedStories[0]?.story_id ?? "");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -600,7 +626,7 @@ function ProductionQueue({ stories, jobs, csrfToken, onUpdated }: {
     }
   };
   return <section className="admin-panel">
-    <div className="panel-heading"><div><span className="eyebrow">STORY WORKSPACE</span><h2>Story Production queue</h2></div><StatusBadge value="PUBLISHING_DISABLED" /></div>
+    <div className="panel-heading"><div><span className="eyebrow">STORY WORKSPACE</span><h2>Story Production queue</h2></div><StatusBadge value={isDemoMode() ? "PUBLISHING_DISABLED" : "HUMAN_APPROVAL_REQUIRED"} /></div>
     <p className="panel-description">Only an already-queued, policy-eligible story can be selected. Dispatch is separately disabled until the server and Gemini automation are explicitly configured.</p>
     <div className="production-dispatch">
       <label>Queued story<select aria-label="Queued story to process" value={storyId} onChange={(event) => setStoryId(event.target.value)} disabled={!queuedStories.length || busy}>
@@ -619,12 +645,12 @@ function ProductionQueue({ stories, jobs, csrfToken, onUpdated }: {
 }
 
 function StoryEditor({ storyId, csrfToken, onClose, onUpdated }: { storyId: string; csrfToken: string; onClose: () => void; onUpdated: () => void }) {
+  // စာသား၊ အပိုင်း၊ quiz နှင့် အသံ URL ပြင်နိုင်သည်။ Demo တွင် browser ထဲသာသိမ်းပြီး live တွင် API သုံးသည်။
   const [detail, setDetail] = useState<AdminStoryDetail | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [audioUrl, setAudioUrl] = useState("");
-  const [audioStatus, setAudioStatus] = useState("NOT_READY");
+  const [editorStep, setEditorStep] = useState("basic");
 
   const load = async () => {
     setError("");
@@ -633,8 +659,6 @@ function StoryEditor({ storyId, csrfToken, onClose, onUpdated }: { storyId: stri
         ? loadDemoStoryDetail(storyId)
         : await api.story(storyId);
       setDetail(result);
-      setAudioUrl(result.production.audio_url || "");
-      setAudioStatus(result.production.audio_status || "NOT_READY");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "မူကြမ်း ဖတ်မရပါ။");
     }
@@ -693,10 +717,8 @@ function StoryEditor({ storyId, csrfToken, onClose, onUpdated }: { storyId: stri
         episodes: detail.episodes,
         quiz: detail.quiz,
         reflection: detail.reflection,
-        audio_url: audioUrl,
-        audio_status: audioStatus,
       });
-      setNotice("မူကြမ်းကို သိမ်းဆည်းပြီး content review အခြေအနေကို ပြန်လည်သတ်မှတ်ထားပါသည်။");
+      setNotice("မူကြမ်း သိမ်းပြီးပါပြီ။ စာသားပြင်ထားလျှင် အကြောင်းအရာကို ပြန်စစ်အတည်ပြုပါ။");
       onUpdated();
       await load();
     } catch (cause) {
@@ -746,14 +768,48 @@ function StoryEditor({ storyId, csrfToken, onClose, onUpdated }: { storyId: stri
   };
   if (error && !detail) return <section className="admin-panel"><button className="back-link" onClick={onClose}>← ပြန်သွားရန်</button><ErrorState message={error} retry={() => void load()} /></section>;
   if (!detail) return <LoadingState />;
+  const hasWorkspace = Boolean(detail.production.draft_mode || detail.production.processing_status || detail.production.myanmar_story);
+  if (!hasWorkspace) return <section className="admin-panel story-editor workspace-not-started">
+    <span className="eyebrow">ရှာတွေ့ထားသော ရင်းမြစ်</span>
+    <h2>{detail.story.original_title || "ပုံပြင်ရင်းမြစ်"}</h2>
+    <div className="workflow-callout"><h3>မူကြမ်း မစတင်ရသေးပါ</h3>
+      <p>ဤမှတ်တမ်းသည် ရှာတွေ့ထားသော ရင်းမြစ်စာရင်းဖြစ်ပြီး AI မူကြမ်း မရှိသေးပါ။ ပုံပြင်အသစ် စမ်းထုတ်ရန် အောက်ပါခလုတ်မှ ခေါင်းစဉ်၊ ပရိသတ်နှင့် theme ကိုရွေးပါ။</p>
+      <p>ရင်းမြစ်၏ အမျိုးအစား — {burmeseCategory[detail.story.category] || "မသတ်မှတ်ရသေး"}</p>
+    </div>
+    <div className="workflow-actions"><Link className="button button-primary" to="/admin/production">AI ပုံပြင်အသစ် ဖန်တီးရန် <ArrowRight size={16} /></Link>
+      <Link className="button button-quiet" to="/admin/rights">ရင်းမြစ်အခွင့်အရေး စစ်ဆေးရန်</Link></div>
+  </section>;
+  if (!detail.production.myanmar_story) return <section className="admin-panel story-editor">
+    <button className="back-link" onClick={onClose}>← စာရင်းသို့</button>
+    <h2>{detail.story.original_title || "ပုံပြင်အသစ်"}</h2>
+    <p>Workspace ဖန်တီးပြီးပါပြီ။ AI မူကြမ်းကို အရင်ထုတ်ပြီးမှ စာသားပြင်ခြင်း၊ review နှင့် အသံထုတ်ခြင်း ဆက်လုပ်နိုင်ပါမည်။</p>
+    <MvpStoryActions storyId={storyId} csrf={csrfToken} detail={detail} refresh={async () => { await load(); onUpdated(); }} />
+  </section>;
   const setEpisodeContent = (index: number, content: string) => updateEpisode(index, "content", content);
-  return <section className="admin-panel story-editor">
+  return <section className={`admin-panel story-editor ${!isDemoMode() ? "editor-redesign" : ""}`} onClickCapture={(event) => {
+    const anchor = (event.target as HTMLElement).closest("a");
+    if (anchor?.getAttribute("href") === "#story-audio") { event.preventDefault(); setEditorStep("audio"); }
+    if (anchor?.getAttribute("href") === "#story-review") { event.preventDefault(); setEditorStep("review"); }
+  }}>
     <div className="editor-heading"><div><button className="back-link" onClick={onClose}>← Story Production တန်းစီသို့</button><span className="eyebrow">DRAFT WORKSPACE · {storyId}</span><h2>{detail.story.original_title || "မူကြမ်း workspace"}</h2></div><StatusBadge value={detail.production.content_review_status || "PENDING"} /></div>
     {isDemoMode() && <div className="demo-notice"><CircleHelp size={17} /><span>Demo fixture — ဤဇာတ်လမ်းနှင့် rights metadata သည် စမ်းသပ်နမူနာသာဖြစ်သည်။ ပြင်ဆင်မှုများကို browser local storage တွင်သာ သိမ်းဆည်းပါသည်။</span></div>}
     {error && <ErrorState message={error} retry={() => void load()} />}
     {notice && <div className="toast-note" role="status"><CheckCircle2 size={17} />{notice}</div>}
+    {!isDemoMode() && <nav className="editor-step-nav" aria-label="ပုံပြင်ပြင်ဆင်မှု အဆင့်များ">{[["basic", "Basic Information"], ["content", "Story Content"], ["image", "Image (Optional)"], ["audio", "Audio"], ["review", "Review & Publish"]].map(([id, label], index) => <button className={editorStep === id ? "active" : ""} aria-pressed={editorStep === id} onClick={() => setEditorStep(id)} key={id}><span>{index + 1}</span>{label}</button>)}</nav>}
+    <div className="editor-step-content">
+    {!isDemoMode() && editorStep === "basic" && <section className="editor-basic-summary"><span className="eyebrow">STORY INFORMATION</span><h3>{detail.production.myanmar_title || detail.story.original_title}</h3><dl><div><dt>ပရိသတ်</dt><dd>{burmeseCategory[detail.story.category]}</dd></div><div><dt>စာသားစစ်ဆေးချက်</dt><dd>{detail.production.content_review_status}</dd></div><div><dt>ပုံ</dt><dd>{detail.production.cover_image_url ? "ထည့်ပြီး" : "မပါဝင် · ရွေးချယ်စရာ"}</dd></div><div><dt>အသံ</dt><dd>{detail.production.audio_url ? detail.production.audio_status === "READY" ? "အတည်ပြုပြီး" : "နားထောင်စစ်ရန်" : "မထုတ်ရသေး"}</dd></div></dl><p>စာသား၊ ပုံ၊ အသံနှင့် ထုတ်ဝေမှုကို ဘေးရှိ အဆင့်များမှ သီးခြားစီ ပြင်ဆင်နိုင်ပါသည်။</p><button className="button button-primary" onClick={() => setEditorStep("content")}>စာသားပြင်ဆင်ရန် <ArrowRight size={16} /></button></section>}
+    {detail.production.episode_partition_rebuilt === "YES" && <p role="status">AI ပေးသော အပိုင်းစာသားများ မကိုက်ညီသဖြင့် ပုံပြင်အပြည့်မှ အပိုင်းပြန်ခွဲထားပါသည်။ စာသားနှင့် အပိုင်းခေါင်းစဉ်များကို လူက ပြန်စစ်ပါ။</p>}
     <details className="source-review"><summary>ရင်းမြစ်နှင့် အခွင့်အရေး အချက်အလက်</summary><div className="source-review-grid"><div><span>Audience</span><strong>{burmeseCategory[detail.story.category] || "အမျိုးအစား မသတ်မှတ်ရသေး"}</strong></div><div><span>License</span><StatusBadge value={detail.story.license_status || "NEEDS_REVIEW"} /></div><div><span>Rights</span><StatusBadge value={detail.story.rights_cleared || "NO"} /></div><div><span>Reviewer</span><strong>{detail.story.human_reviewer || "မရှိသေး"}</strong></div></div><p>{detail.story.license_evidence || "အထောက်အထား မထည့်ရသေးပါ"} · {detail.story.rights_jurisdiction || "jurisdiction မသတ်မှတ်ရသေး"}</p>{detail.story.source_text && <details className="private-source"><summary>Admin-only source text</summary><pre>{detail.story.source_text}</pre></details>}</details>
-    <form onSubmit={(event) => void save(event)}>
+    <div hidden={!isDemoMode() && editorStep !== "audio"}>{!isDemoMode() && <StoryAudioPanel storyId={storyId} csrf={csrfToken} refreshKey={`${detail.production.content_review_status}:${detail.story.permission_for_audio}`} defaultReviewer={detail.story.original_reviewer || ""} onReviewed={(status) => {
+      // အသံစစ်ဆေးချက်ကိုသာ ပြောင်း၍ မသိမ်းရသေးသော စာသားပြင်ဆင်မှုများကို ထိန်းထားသည်။
+      setDetail((current) => current ? { ...current, production: { ...current.production, audio_status: status, approval_status: "" } } : current);
+      onUpdated();
+    }} />}</div>
+    <div hidden={!isDemoMode() && editorStep !== "image"}>{!isDemoMode() && <ImageManager storyId={storyId} csrf={csrfToken} imageUrl={detail.production.cover_image_url || ""} onChanged={(url) => {
+      setDetail((current) => current ? { ...current, production: { ...current.production, cover_image_url: url } } : current);
+      onUpdated();
+    }} />}</div>
+    <form hidden={!isDemoMode() && editorStep !== "content"} onSubmit={(event) => void save(event)}>
       <label className="editor-field">မြန်မာခေါင်းစဉ်<input value={detail.production.myanmar_title || ""} onChange={(event) => updateProduction("myanmar_title", event.target.value)} required /></label>
       <label className="editor-field">မြန်မာပုံပြင်<textarea className="story-textarea" value={detail.production.myanmar_story || ""} onChange={(event) => updateProduction("myanmar_story", event.target.value)} required /></label>
       <div className="editor-subhead"><div><span className="eyebrow">EPISODE SEQUENCE</span><h3>အပိုင်းများ</h3></div><button className="small-link" type="button" onClick={() => setDetail({ ...detail, episodes: [...detail.episodes, { episode_number: detail.episodes.length + 1, title: "", content: "" }] })}>+ အပိုင်းထည့်ရန်</button></div>
@@ -761,14 +817,13 @@ function StoryEditor({ storyId, csrfToken, onClose, onUpdated }: { storyId: stri
       <div className="editor-subhead"><div><span className="eyebrow">LEARNING MOMENTS</span><h3>Quiz မေးခွန်းများ</h3></div><button className="small-link" type="button" onClick={() => setDetail({ ...detail, quiz: [...detail.quiz, { question: "", answer: "" }] })}>+ မေးခွန်းထည့်ရန်</button></div>
       {detail.quiz.map((item, index) => <div className="quiz-editor" key={index}><label className="editor-field">မေးခွန်း<input value={item.question} onChange={(event) => updateQuiz(index, "question", event.target.value)} required /></label><label className="editor-field">အဖြေ<input value={item.answer} onChange={(event) => updateQuiz(index, "answer", event.target.value)} required /></label><button className="remove-button" type="button" disabled={detail.quiz.length === 1} onClick={() => setDetail({ ...detail, quiz: detail.quiz.filter((_, itemIndex) => itemIndex !== index) })}>ဖယ်ရှားရန်</button></div>)}
       <label className="editor-field">စဉ်းစားရန်<textarea value={Array.isArray(detail.reflection) ? detail.reflection.join("\n") : detail.reflection} onChange={(event) => setDetail({ ...detail, reflection: event.target.value })} required /></label>
-      <div className="editor-subhead"><div><span className="eyebrow">AUDIO REVIEW</span><h3>အသံဖိုင်</h3></div><StatusBadge value={audioStatus} /></div>
       {isDemoMode() && <DemoAudioPlayer compact title={`${detail.production.myanmar_title || "Myanmar story"} · UI preview`} onNotice={setNotice} />}
-      <label className="editor-field">အသံဖိုင် URL<input value={audioUrl} onChange={(event) => setAudioUrl(event.target.value)} placeholder="/audio/story.mp3" /></label>
-      <label className="editor-field">အသံဖိုင်အခြေအနေ<select value={audioStatus} onChange={(event) => setAudioStatus(event.target.value)}><option>NOT_READY</option><option>WAITING_PROVIDER_VERIFICATION</option><option>READY</option></select></label>
-      {audioUrl && audioStatus === "READY" && <audio className="editor-audio" controls preload="none" src={audioUrl} />}
       <div className="editor-actions"><button className="button button-primary" disabled={busy}>{busy ? "လုပ်ဆောင်နေသည်…" : isDemoMode() ? "Demo ပြင်ဆင်မှု သိမ်းရန်" : "မူကြမ်း သိမ်းဆည်းရန်"}</button><button className="button button-approve" type="button" disabled={busy} onClick={() => void review("approve")}>{isDemoMode() ? "Demo content approve" : "အကြောင်းအရာ အတည်ပြုရန်"}</button><button className="button button-reject" type="button" disabled={busy} onClick={() => void review("reject")}>{isDemoMode() ? "Demo reject" : "မူကြမ်း ပယ်ချရန်"}</button></div>
-      <p className="editor-safety"><ShieldCheck size={15} /> Content approval သည် publication approval မဟုတ်ပါ။ Rights gate သီးခြားရှိပြီး ထုတ်ဝေမှု ပိတ်ထားသည်။</p>
+      <p className="editor-safety"><ShieldCheck size={15} /> Content approval သည် publication approval မဟုတ်ပါ။ ထုတ်ဝေရန် သီးခြားလူအတည်ပြုချက် လိုသည်။</p>
     </form>
+    <div hidden={!isDemoMode() && editorStep !== "review"}>{!isDemoMode() && <MvpStoryActions storyId={storyId} csrf={csrfToken} detail={detail} refresh={async () => { await load(); onUpdated(); }} />}</div>
+    </div>
+    {!isDemoMode() && <aside className="editor-info-rail"><img src={detail.production.cover_image_url || defaultStoryArt} alt="ပုံပြင် အကြိုကြည့်ရန်" /><h3>Story Information</h3><p>{detail.production.myanmar_title || detail.story.original_title}</p><span className="management-status stage-draft">{detail.production.content_review_status}</span><dl><div><dt>ပရိသတ်</dt><dd>{burmeseCategory[detail.story.category]}</dd></div><div><dt>Image Status</dt><dd>{detail.production.cover_image_url ? "✓ Has Image" : "Optional"}</dd></div><div><dt>Audio</dt><dd>{detail.production.audio_status || "NOT_READY"}</dd></div></dl><button className="button button-primary" onClick={() => setEditorStep("review")}>Review & Publish <ArrowRight size={16} /></button></aside>}
   </section>;
 }
 

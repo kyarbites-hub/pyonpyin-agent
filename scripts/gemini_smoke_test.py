@@ -3,7 +3,8 @@
 import re
 import sys
 
-from pyonpyin.gemini import GeminiClient
+from pyonpyin.gemini import GeminiClient, GeminiError
+from pyonpyin.config import load_environment
 
 
 def has_myanmar_text(value):
@@ -11,6 +12,7 @@ def has_myanmar_text(value):
 
 
 def main():
+    load_environment()
     client = GeminiClient(attempts=1)
     draft = client.generate_draft(
         {
@@ -44,5 +46,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        print(f"Gemini live smoke test failed: {type(exc).__name__}.", file=sys.stderr)
+        # Adapter errors contain only static validation reasons / HTTP codes, never the key or draft.
+        reason = f" {exc}" if isinstance(exc, GeminiError) else ""
+        print(f"Gemini live smoke test failed: {type(exc).__name__}.{reason}", file=sys.stderr)
         sys.exit(1)

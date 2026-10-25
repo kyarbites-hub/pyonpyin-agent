@@ -8,6 +8,8 @@ import uuid
 from pyonpyin.core import eligible_candidate, safe_story_theme, utc_now
 from pyonpyin.gemini import GeminiClient
 from pyonpyin.sheets import SheetsStore
+from pyonpyin.storage import get_store
+from pyonpyin.config import load_environment
 from story_finder import queue_automatic_draft
 
 
@@ -16,6 +18,7 @@ PROMPT_VERSION = "myanmar-originality-v2"
 
 def queue_eligible_stories(store, library_records, production_rows):
     """Queue safe library records once, using the discovery eligibility policy."""
+    # Library ထဲက အရည်အချင်းပြည့်ပြီး မူကြမ်းမရှိသေးသောပုံပြင်ကိုသာ အလုပ်တန်းထဲ ထည့်သည်။
     queued_count = 0
     for story in library_records:
         if queue_automatic_draft(store, story, production_rows):
@@ -37,6 +40,7 @@ def queue_eligible_stories(store, library_records, production_rows):
 
 
 def process_queued_stories(store, client=None, max_drafts=1, target_story_id=""):
+    # ပုံမှန်တစ်ကြိမ်လျှင် မူကြမ်းတစ်ပုဒ်သာထုတ်သည်။ Target ID ပါလျှင် ထိုပုံပြင်ကိုသာ လုပ်သည်။
     if max_drafts < 1:
         raise ValueError("max_drafts must be at least 1.")
     library_records = store.read_records("Story Library")
@@ -95,6 +99,7 @@ def process_queued_stories(store, client=None, max_drafts=1, target_story_id="")
         story["draft_mode"] = mode
 
         if mode == "ORIGINAL_THEME":
+            # မူရင်းစာသား၊ ခေါင်းစဉ်၊ စာရေးဆရာတို့ မပါသော record အသစ်ဖြင့် AI ကို ဆက်ခေါ်သည်။
             theme = safe_story_theme(
                 story.get("category", ""), story.get("broad_theme", "")
             )
@@ -177,11 +182,13 @@ def process_queued_stories(store, client=None, max_drafts=1, target_story_id="")
             if client is None:
                 client = GeminiClient()
             draft = client.generate_draft(story, source_text)
+            # ရလာသည့်စာသည် လူစစ်ရန်မူကြမ်းသာဖြစ်ပြီး approval ကိုမပေးဘဲ အသံကိုလည်း pending ထားသည်။
             episodes = draft["episodes"]
             production.update({
                 "myanmar_title": draft["title"],
                 "myanmar_story": draft["story"],
                 "episodes_json": json.dumps(episodes, ensure_ascii=False),
+                "episode_partition_rebuilt": "YES" if draft.get("episode_partition_rebuilt") else "NO",
                 "quiz_json": json.dumps(draft["quiz"], ensure_ascii=False),
                 "reflection_json": json.dumps(draft["reflection"], ensure_ascii=False),
                 "model_name": client.model,
@@ -190,7 +197,7 @@ def process_queued_stories(store, client=None, max_drafts=1, target_story_id="")
                 "approval_status": "",
                 "processing_status": "DRAFT_READY",
                 "processing_error": "",
-                "audio_status": "WAITING_PROVIDER_VERIFICATION",
+                "audio_status": "NOT_READY",
                 "updated_at": utc_now(),
             })
             store.write_production(production)
@@ -228,10 +235,12 @@ def process_queued_stories(store, client=None, max_drafts=1, target_story_id="")
 
 
 def main():
+    # အလိုအလျောက် AI သုံးမှုကို တိတိကျကျ မဖွင့်ထားလျှင် Sheets ချိတ်ဆက်မှုပါ မလုပ်ပါ။
+    load_environment()
     if os.environ.get("PYONPYIN_GEMINI_AUTOMATION_ENABLED", "").strip().lower() != "true":
         print("Gemini automation is disabled; set PYONPYIN_GEMINI_AUTOMATION_ENABLED=true to opt in.")
         return 0
-    store = SheetsStore()
+    store = get_store()
     store.ensure_schema()
     failures = process_queued_stories(
         store,

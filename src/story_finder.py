@@ -36,6 +36,7 @@ def normalize_url(raw_url):
 
 
 def load_approved_sources(source_file=SOURCES_FILE):
+    # ရင်းမြစ်စာရင်းထဲတွင် အတည်ပြုပြီး automation ခွင့်ပြုထားသော source များကိုသာ ဖတ်ယူသည်။
     """Return only approved sources that are allowed to be automated."""
     with source_file.open("r", encoding="utf-8") as file:
         sources = json.load(file)
@@ -131,19 +132,24 @@ def _fetch_verified_text(text_url, feed_host):
     return _extract_text(content.decode("utf-8-sig", errors="replace"))
 
 
-def fetch_new_books(feed_url, max_items=None, source_configuration=None):
+def fetch_new_books(feed_url, max_items=None, source_configuration=None, diagnostics=None):
+    # HTTPS feed မှ metadata ရယူသည်။ မူရင်းစာသားဖတ်ခြင်းကို verified policy ရှိမှသာ ခွင့်ပြုသည်။
     """Read a source Atom or RSS feed and return discovered book candidates."""
     include_source_text = (
         source_configuration is not None
         and verified_public_domain_policy(source_configuration) is not None
     )
-    if not feed_url:
+    def failed(reason):
+        if diagnostics is not None:
+            diagnostics.append(reason)
         return []
+    if not feed_url:
+        return failed("Missing feed URL")
     try:
         parsed_feed = urlsplit(feed_url)
     except ValueError:
         print("Skipping feed: the configured URL is malformed.")
-        return []
+        return failed("Malformed feed URL")
     if (
         parsed_feed.scheme.lower() != "https"
         or not parsed_feed.hostname
@@ -151,7 +157,7 @@ def fetch_new_books(feed_url, max_items=None, source_configuration=None):
         or parsed_feed.password
     ):
         print("Skipping feed: only public HTTPS feed URLs are allowed.")
-        return []
+        return failed("Public HTTPS feed URL required")
     try:
         addresses = {
             ipaddress.ip_address(result[4][0])
@@ -159,10 +165,10 @@ def fetch_new_books(feed_url, max_items=None, source_configuration=None):
         }
     except (OSError, ValueError) as exc:
         print(f"Unable to resolve approved feed host: {type(exc).__name__}")
-        return []
+        return failed("Feed DNS resolution failed")
     if not addresses or any(not address.is_global for address in addresses):
         print("Skipping feed: feed host does not resolve exclusively to public addresses.")
-        return []
+        return failed("Feed host is not public")
 
     request = urllib.request.Request(
         feed_url,
@@ -175,32 +181,34 @@ def fetch_new_books(feed_url, max_items=None, source_configuration=None):
                 final_url = urlsplit(response.geturl())
                 if final_url.scheme.lower() != "https" or not final_url.hostname:
                     print("Skipping feed response: HTTPS redirects are required.")
-                    return []
+                    return failed("Non-HTTPS redirect")
                 if final_url.hostname.lower() != parsed_feed.hostname.lower():
                     print("Skipping feed response: redirects to a different host are not allowed.")
-                    return []
+                    return failed("Cross-host redirect")
                 xml_data = response.read(5 * 1024 * 1024 + 1)
                 if len(xml_data) > 5 * 1024 * 1024:
                     print("Skipping feed: response exceeds the 5 MiB safety limit.")
-                    return []
+                    return failed("Feed exceeds size limit")
             break
         except urllib.error.HTTPError as exc:
             if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
                 print(f"Unable to fetch feed; HTTP {exc.code}.")
-                return []
+                exc.close()
+                return failed(f"HTTP {exc.code}")
+            exc.close()
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             if attempt == 2:
                 print(f"Unable to fetch feed: {type(exc).__name__}")
-                return []
+                return failed(type(exc).__name__)
         time.sleep(2 ** attempt)
     if xml_data is None:
-        return []
+        return failed("No feed response")
 
     try:
         root = ET.fromstring(xml_data)
     except ET.ParseError as exc:
         print(f"Unable to parse feed {feed_url}: {exc}")
-        return []
+        return failed("Invalid feed XML")
 
     namespaces = {
         "atom": "http://www.w3.org/2005/Atom",
@@ -354,6 +362,7 @@ def remove_duplicate_books(books):
 
 
 def cap_candidates_per_category(books, child_limit=5, adult_limit=5, unclassified_limit=5):
+    # Run တစ်ကြိမ်တွင် category တစ်မျိုးချင်းစီအတွက် သတ်မှတ်အရေအတွက်ထက် မကျော်အောင် ကန့်သတ်သည်။
     """Keep independent per-cycle caps without guessing unknown age categories."""
     limits = {
         "CHILDREN": child_limit,
@@ -378,6 +387,7 @@ def cap_candidates_per_category(books, child_limit=5, adult_limit=5, unclassifie
 
 
 def create_library_record(book, source):
+    # Feed metadata ကို Sheets record အဖြစ်ပြောင်းပြီး မသေချာသော rights ကို ခွင့်ပြုပြီးဟု မသတ်မှတ်ပါ။
     source_name = source.get("source_name", "Unknown")
     source_url = book.get("source_url") or book.get("url", "")
     source_id = book.get("source_id") or normalize_url(source_url)
@@ -429,6 +439,7 @@ def create_library_record(book, source):
 
 def queue_automatic_draft(store, record, existing_production):
     """Queue one safe draft per discovered story without overwriting existing work."""
+    # Category အထောက်အထားလိုသည်။ မူကြမ်းရှိပြီးသားဆိုလျှင် လူပြင်ထားသောအလုပ်ကို မရေးထပ်ပါ။
     story_id = record.get("story_id", "")
     if not story_id or any(row.get("story_id") == story_id for row in existing_production):
         return False
@@ -628,10 +639,21 @@ def save_books_to_sheet(service, books, source_name):
     return len(new_rows)
 
 
-def main():
+def main(store_override=None, report=None):
+    # Discovery သည် စာရင်းသွင်းခြင်းနှင့် queue ထည့်ခြင်းသာလုပ်သည်။ AI generation ကို သီးခြား run ရသည်။
     """Run the story discovery cycle in dry-run mode when Google credentials are absent."""
-    store = None
-    if (
+    from pyonpyin.config import load_environment
+    load_environment()
+    # တစ်ကြိမ်ရှာတိုင်း အသစ်တွေ့၊ ထပ်နေ၊ အမှားဖြစ်သည့် အရေအတွက်ကို UI အတွက် သိမ်းပေးသည်။
+    report = report if report is not None else {}
+    report.update(sources=[], found=0, duplicates=0, added=0, drafts_queued=0, deferred=0)
+    store = store_override
+    if store is not None:
+        pass
+    elif os.environ.get("PYONPYIN_STORAGE", "").lower() == "sqlite":
+        from pyonpyin.storage import get_store
+        store = get_store()
+    elif (
         os.environ.get("GOOGLE_SPREADSHEET_ID")
         and (
             os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -657,7 +679,7 @@ def main():
         for row in library_records
         if row.get("source_url")
     }
-    legacy_urls = existing_source_queue_urls(store.service) if store is not None else set()
+    legacy_urls = existing_source_queue_urls(store.service) if store is not None and hasattr(store, "service") else set()
     discovered = []
     for source in approved_sources:
         feed_url = source.get("feed_url")
@@ -666,11 +688,16 @@ def main():
             continue
 
         print(f"\nChecking source: {source.get('source_name')}")
+        diagnostics = []
         books = fetch_new_books(
             feed_url,
             max_items=15 if verified_public_domain_policy(source) else None,
             source_configuration=source,
+            diagnostics=diagnostics,
         )
+        report["sources"].append({"name": source.get("source_name", ""), "found": len(books),
+                                  "errors": diagnostics})
+        report["found"] += len(books)
         print(f"Books found: {len(books)}")
         for book in remove_duplicate_books(books):
             raw_category = book.pop("source_category_raw", "")
@@ -719,10 +746,12 @@ def main():
         record = create_library_record(book, source)
         url = normalize_url(record["source_url"])
         if record["story_id"] in seen_ids or url in seen_urls:
+            report["duplicates"] += 1
             continue
         seen_ids.add(record["story_id"])
         seen_urls.add(url)
         if record["story_id"] in known_ids or url in known_urls:
+            report["duplicates"] += 1
             if (
                 store is not None
                 and record["story_id"] in known_ids
@@ -737,6 +766,7 @@ def main():
     )
     candidate_ids = {record["story_id"] for record in candidates}
     new_candidates = [item for item in fresh if item[2]["story_id"] in candidate_ids]
+    report["deferred"] = len(fresh) - len(new_candidates)
 
     print(f"New candidates selected: {len(new_candidates)}")
     existing_production = (
@@ -773,7 +803,10 @@ def main():
                 })
                 drafts_queued += 1
     print(f"Automatic safe drafts queued: {drafts_queued}")
-    if store is not None:
+    report.update(added=library_saved, drafts_queued=drafts_queued)
+    if report["sources"] and all(item["errors"] for item in report["sources"]):
+        return 1
+    if store is not None and hasattr(store, "service"):
         legacy_saved = 0
         for source_name, books in legacy_additions.items():
             legacy_saved += save_books_to_sheet(store.service, books, source_name)

@@ -1,5 +1,17 @@
 # PyonPyin Architecture
 
+## Current MVP storage/worker update — 2026-10-25
+
+The local MVP defaults to SQLite when no Sheets spreadsheet is configured;
+`.env.example` explicitly selects SQLite. `storage.py` selects the backend,
+`sqlite_store.py` supplies transactional persistence and durable job claims,
+`worker.py` runs generation/discovery/Azure audio outside HTTP requests, and
+`mvp_api.py` exposes UI-independent original review, publication and audio workflows.
+Database and audio share a persistent host/volume (`compose.yaml`). GitHub dispatch
+is disabled for local SQLite. The Sheets-specific architecture below remains an
+optional legacy integration. See [current setup](MVP_SETUP_MM.md) and
+[API contract](MVP_API.md) for the implemented MVP boundaries and limitations.
+
 ## Verified current state
 
 This document describes the checked-in layout and current worktree on

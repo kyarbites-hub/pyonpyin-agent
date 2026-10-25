@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import urllib.error
 import urllib.request
 import uuid
@@ -12,19 +13,27 @@ from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
+from flask import Flask, abort, g, has_request_context, jsonify, redirect, render_template_string, request, send_from_directory, session, url_for
 
 from pyonpyin.core import (
     eligible_candidate,
+    original_reviewed,
     normalize_url,
     publication_blockers,
     safe_story_theme,
     utc_now,
 )
 from pyonpyin.sheets import SHEET_CELL_SAFE_LIMIT, SheetsStore
+from pyonpyin.config import load_environment
+from pyonpyin.storage import get_store, storage_backend
+from pyonpyin.workflow import publicly_visible, story_snapshot
+from werkzeug.exceptions import HTTPException
+
+load_environment()
 
 
 app = Flask(__name__)
+# Flask သည် admin session၊ API နှင့် build ပြီးသော React ဖိုင်များကို တစ်နေရာတည်းမှ ပေးသည်။
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 app.secret_key = os.environ.get("PYONPYIN_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
@@ -32,7 +41,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("PYONPYIN_HTTPS", "").lower() == "true",
     PERMANENT_SESSION_LIFETIME=8 * 60 * 60,
-    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+    MAX_CONTENT_LENGTH=26 * 1024 * 1024,
 )
 
 
@@ -139,13 +148,54 @@ textarea{width:96%;min-height:180px}button{border:0;border-radius:.5rem;backgrou
 
 
 def _store(initialize=False):
-    store = SheetsStore()
+    if has_request_context() and storage_backend() == "sqlite" and "story_store" in g:
+        return g.story_store
+    store = get_store()
+    if has_request_context() and storage_backend() == "sqlite":
+        g.story_store = store
     if initialize:
         store.ensure_schema()
     return store
 
 
+@app.errorhandler(HTTPException)
+def api_http_error(error):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": error.description}), error.code
+    return error
+
+
+@app.errorhandler(sqlite3.OperationalError)
+def database_busy(error):
+    app.logger.warning("Database operation unavailable: %s", type(error).__name__)
+    return jsonify({"error": "Database is busy or unavailable. Retry shortly."}), 503
+
+
+@app.before_request
+def limit_admin_login():
+    if request.method == "POST" and request.path in {"/admin/login", "/api/admin/login"} and storage_backend() == "sqlite":
+        store = _store()
+        # Proxy header ကို မယုံဘဲ socket address ကိုသာ rate limit လုပ်သည်။
+        if hasattr(store, "allow_login_attempt") and not store.allow_login_attempt(request.remote_addr or "unknown"):
+            abort(429, "Too many login attempts. Wait five minutes before retrying.")
+
+
+@app.before_request
+def protect_active_drafts():
+    # Worker အလုပ်လုပ်နေစဉ် legacy/React editor နှစ်ခုစလုံးမှ ထိုပုံပြင်ကို မပြင်နိုင်ပါ။
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not session.get("admin_authenticated"):
+        return
+    match = re.match(r"/(?:api/)?admin/story/([^/]+)/", request.path)
+    if match and storage_backend() == "sqlite":
+        store = _store()
+        if hasattr(store, "has_active_job") and store.has_active_job(match[1]):
+            # တူညီသော enqueue ကို ထပ်ပို့လျှင် ရှိပြီးသား job ကိုပဲ ပြန်ပေးနိုင်အောင် ခွင့်ပြုသည်။
+            if not request.path.endswith("/jobs"):
+                abort(409, "A job is active for this story; wait or reconcile it first.")
+
+
 def _episode_json(store, story_id, production, segmented=None, episode_rows=None):
+    # Inline JSON ကိုဦးစားပေးပြီး မရှိမှ ခွဲသိမ်းစာသား၊ ထို့နောက် episode tab ကို အစဉ်လိုက် ရှာသည်။
     inline = production.get("episodes_json", "")
     if inline:
         return inline
@@ -159,7 +209,10 @@ def _episode_json(store, story_id, production, segmented=None, episode_rows=None
         row for row in episode_rows
         if row.get("story_id") == story_id and row.get("complete", "").upper() == "YES"
     ]
-    rows.sort(key=lambda row: int(row.get("episode_number", 0)))
+    try:
+        rows.sort(key=lambda row: int(row.get("episode_number", 0)))
+    except (TypeError, ValueError):
+        return "[]"
     for row in rows:
         row["episode_number"] = int(row.get("episode_number", 0))
     return json.dumps(rows, ensure_ascii=False)
@@ -174,6 +227,7 @@ def inject_csrf_token():
 
 @app.before_request
 def check_admin_csrf():
+    # Login မှလွဲ၍ admin ဒေတာပြောင်းသည့် request များတွင် session နှင့် CSRF token ကိုက်ရမည်။
     if request.method in {"POST", "PUT", "PATCH", "DELETE"} and (
         request.path.startswith("/admin/")
         or request.path.startswith("/api/admin/")
@@ -183,7 +237,7 @@ def check_admin_csrf():
             request.headers.get("X-CSRF-Token", "")
             or request.form.get("csrf_token", "")
         )
-        if not expected or not hmac.compare_digest(expected, provided):
+        if not expected or not hmac.compare_digest(expected.encode("utf-8"), provided.encode("utf-8")):
             abort(400, "Invalid or missing CSRF token.")
 
 
@@ -212,6 +266,7 @@ def _frontend_file(path="index.html"):
 
 
 @app.get("/app")
+@app.get("/app/")
 def frontend_app():
     return _frontend_file()
 
@@ -227,6 +282,7 @@ def frontend_built_asset(asset):
 
 
 @app.get("/admin/app")
+@app.get("/admin/app/")
 def frontend_admin_app():
     return _frontend_file()
 
@@ -243,7 +299,7 @@ def admin_login():
     if not password or not session_secret:
         abort(503, "Set PYONPYIN_ADMIN_PASSWORD and PYONPYIN_SESSION_SECRET to enable dashboard access.")
     if request.method == "POST":
-        if hmac.compare_digest(request.form.get("password", ""), password):
+        if hmac.compare_digest(request.form.get("password", "").encode("utf-8"), password.encode("utf-8")):
             session["admin_authenticated"] = True
             session.permanent = True
             return redirect(url_for("admin"))
@@ -263,7 +319,7 @@ def admin_api_login():
         }), 503
     supplied = request.get_json(silent=True) or {}
     if not isinstance(supplied, dict) or not hmac.compare_digest(
-        str(supplied.get("password", "")), password
+        str(supplied.get("password", "")).encode("utf-8"), password.encode("utf-8")
     ):
         return jsonify({"error": "Invalid credentials."}), 401
     session.clear()
@@ -283,6 +339,7 @@ def admin_api_logout():
 @app.get("/api/admin/overview")
 @_admin_api_required
 def admin_api_overview():
+    # Dashboard အတွက် စာရင်းအနှစ်ချုပ်နှင့် review metadata ကို ပြန်ပေးသည်။
     store = _store()
     csrf_token = session.get("csrf_token")
     if not csrf_token:
@@ -296,6 +353,15 @@ def admin_api_overview():
         if row.get("publication_status", "").strip().upper() == "PUBLISHED"
     }
     production_by_id = {row.get("story_id"): row for row in production}
+    visible_ids = set()
+    for story_id in published_ids:
+        try:
+            library_row, draft_row, episode_rows = story_snapshot(store, story_id)
+            if publicly_visible(store, library_row, draft_row, episode_rows):
+                visible_ids.add(story_id)
+        except (LookupError, ValueError):
+            continue
+    published_ids = visible_ids
     pending_review = sum(
         1 for story in library
         if story.get("review_status", "").strip().upper() != "REVIEWED"
@@ -303,9 +369,11 @@ def admin_api_overview():
     )
     rights_review = sum(
         1 for story in library
-        if story.get("rights_cleared", "").strip().upper() != "YES"
-        or story.get("license_status", "").strip().upper()
-        in {"", "NEEDS_LICENSE_REVIEW", "PENDING_REVIEW"}
+        if (not original_reviewed(story) if production_by_id.get(story.get("story_id"), {}).get(
+            "draft_mode") in {"ORIGINAL_THEME", "MANUAL_ORIGINAL"} else (
+                story.get("rights_cleared", "").strip().upper() != "YES"
+                or story.get("license_status", "").strip().upper()
+                in {"", "NEEDS_LICENSE_REVIEW", "PENDING_REVIEW"}))
     )
     content_review = sum(
         1 for row in production
@@ -316,7 +384,7 @@ def admin_api_overview():
     )
     approved = sum(
         1 for story in library
-        if eligible_candidate(story)
+        if (eligible_candidate(story) or original_reviewed(story))
         and production_by_id.get(story.get("story_id"), {}).get(
             "content_review_status", ""
         ).strip().upper() == "APPROVED"
@@ -349,6 +417,11 @@ def admin_api_overview():
             {
                 "story_id": story.get("story_id", ""),
                 "title": story.get("original_title", ""),
+                "audio_url": production_by_id.get(story.get("story_id"), {}).get("audio_url", ""),
+                "cover_image_url": production_by_id.get(story.get("story_id"), {}).get("cover_image_url", ""),
+                "has_story": bool(production_by_id.get(story.get("story_id"), {}).get("myanmar_story")
+                                  or production_by_id.get(story.get("story_id"), {}).get("myanmar_story_segment_count")),
+                "updated_at": production_by_id.get(story.get("story_id"), {}).get("updated_at", story.get("discovered_at", "")),
                 "category": story.get("category", "UNCLASSIFIED"),
                 "license_status": story.get("license_status", ""),
                 "license_name": story.get("license_name", ""),
@@ -436,10 +509,13 @@ def admin_api_jobs():
             )[:50]
         ],
         "dispatch_configured": _github_dispatch_settings() is not None,
+        "local_jobs": storage_backend() == "sqlite",
     })
 
 
 def _github_dispatch_settings():
+    if storage_backend() == "sqlite":
+        return None  # GitHub runner က server ၏ local database ကို မျှဝေသုံးမရပါ။
     token = os.environ.get("PYONPYIN_GITHUB_TOKEN", "").strip()
     repository = os.environ.get("PYONPYIN_GITHUB_REPOSITORY", "").strip()
     ref = os.environ.get("PYONPYIN_GITHUB_REF", "main").strip()
@@ -463,6 +539,8 @@ def _github_dispatch_settings():
 @app.post("/api/admin/jobs/dispatch")
 @_admin_api_required
 def admin_api_dispatch_job():
+    # Queue ထဲရှိ ပုံပြင်တစ်ပုဒ်အတွက် GitHub Actions ကို server-side မှ စတင်ခိုင်းသည်။
+    # Sheets ရှိ status စစ်ခြင်းသည် တစ်ပြိုင်နက် request များအတွက် atomic lock မဟုတ်ပါ။
     settings = _github_dispatch_settings()
     if settings is None:
         abort(503, "GitHub dispatch is disabled or missing server-side configuration.")
@@ -609,6 +687,7 @@ def admin_api_story(story_id):
                 "permission_for_translation", "permission_for_ai_processing",
                 "permission_for_publication", "permission_for_audio",
                 "human_reviewer", "review_status", "rights_mode",
+                "original_review_status", "original_reviewer", "original_evidence",
             )
         },
         "production": {
@@ -617,6 +696,7 @@ def admin_api_story(story_id):
                 "myanmar_title", "myanmar_story", "audio_url", "audio_status",
                 "audio_required", "processing_status", "processing_error",
                 "content_review_status", "approval_status", "draft_mode",
+                "episode_partition_rebuilt",
             )
         },
         "episodes": episodes if isinstance(episodes, list) else [],
@@ -628,6 +708,7 @@ def admin_api_story(story_id):
 @app.put("/api/admin/story/<story_id>/rights-review")
 @_admin_api_required
 def admin_api_rights_review(story_id):
+    # လူကဖြည့်သော category၊ reviewer၊ အထောက်အထားနှင့် သီးခြားခွင့်ပြုချက်များကို စစ်ပြီး သိမ်းသည်။
     store = _store()
     story = next(
         (row for row in store.read_records("Story Library") if row.get("story_id") == story_id),
@@ -724,6 +805,7 @@ def admin_api_rights_review(story_id):
 @app.put("/api/admin/story/<story_id>/draft")
 @_admin_api_required
 def admin_api_save_draft(story_id):
+    # စာသားနှင့် episode ကိုက်ညီမှုကိုစစ်ပြီး မူကြမ်းပြင်လျှင် content/publication approval ပြန်ဖြုတ်သည်။
     store = _store()
     library_story = next(
         (
@@ -795,26 +877,38 @@ def admin_api_save_draft(story_id):
         and all(isinstance(item, str) and item.strip() for item in reflection)
     ):
         abort(400, "At least one reflection question is required.")
-    audio_url = body.get("audio_url", "")
-    audio_status = body.get("audio_status", "NOT_READY")
+    audio_url = body.get("audio_url", production.get("audio_url", ""))
+    audio_status = body.get("audio_status", production.get("audio_status", "NOT_READY") if audio_url else "NOT_READY")
     if not isinstance(audio_url, str) or not isinstance(audio_status, str):
         abort(400, "Audio URL and status must be text.")
     audio_url = audio_url.strip()
     audio_status = audio_status.strip().upper()
-    if audio_status not in {"NOT_READY", "WAITING_PROVIDER_VERIFICATION", "READY"}:
+    if audio_status not in {"NOT_READY", "WAITING_PROVIDER_VERIFICATION", "PENDING_REVIEW", "READY"}:
         abort(400, "Unsupported audio status.")
     if audio_url and not (
         (audio_url.startswith("/") and not audio_url.startswith("//"))
         or normalize_url(audio_url)
     ):
         abort(400, "Audio reference must be a relative URL or HTTP(S) URL.")
-    if audio_status == "READY" and not audio_url:
-        abort(400, "A ready audio asset must have a URL.")
+    if audio_status in {"READY", "PENDING_REVIEW"} and not audio_url:
+        abort(400, "A saved audio asset must have a URL before audio review.")
     if audio_status == "READY" and library_story.get(
         "permission_for_audio", ""
     ).strip().upper() != "YES":
         abort(409, "Explicit audio rights permission is required before marking audio ready.")
-    story_changed = production.get("myanmar_story", "") != story_text
+    old_text = production.get("myanmar_story", "") or store.read_texts("MYANMAR").get(story_id, "")
+    story_changed = old_text != story_text
+    try:
+        saved_episodes = json.loads(_episode_json(store, story_id, production) or "[]")
+        saved_quiz = json.loads(production.get("quiz_json") or "[]")
+        saved_reflection = json.loads(production.get("reflection_json") or '""')
+    except (ValueError, TypeError):
+        saved_episodes = saved_quiz = saved_reflection = None
+    content_changed = (story_changed or production.get("myanmar_title", "").strip() != title.strip()
+                       or saved_episodes != episodes or saved_quiz != quiz or saved_reflection != reflection)
+    audio_changed = production.get("audio_url", "") != audio_url or production.get("audio_status", "") != audio_status
+    if story_changed and production.get("draft_mode") in {"ORIGINAL_THEME", "MANUAL_ORIGINAL"}:
+        store.upsert_story({"story_id": story_id, "original_review_status": "PENDING"})
     production.update({
         "myanmar_title": title.strip(),
         "myanmar_story": story_text,
@@ -823,19 +917,20 @@ def admin_api_save_draft(story_id):
         "reflection_json": json.dumps(reflection, ensure_ascii=False),
         "audio_url": "" if story_changed else audio_url,
         "audio_status": "NOT_READY" if story_changed else audio_status,
-        "content_review_status": "PENDING",
-        "approval_status": "",
-        "processing_status": "HUMAN_EDITING",
+        "content_review_status": "PENDING" if content_changed else production.get("content_review_status", "PENDING"),
+        "approval_status": "" if content_changed or audio_changed else production.get("approval_status", ""),
+        "processing_status": "HUMAN_EDITING" if content_changed else production.get("processing_status", "HUMAN_EDITING"),
         "processing_error": "",
     })
     store.write_production(production)
     store.write_episodes(story_id, episodes)
-    return jsonify({"ok": True, "processing_status": "HUMAN_EDITING"})
+    return jsonify({"ok": True, "processing_status": production["processing_status"], "content_changed": content_changed})
 
 
 @app.post("/api/admin/story/<story_id>/content-review")
 @_admin_api_required
 def admin_api_content_review(story_id):
+    # အကြောင်းအရာအတည်ပြုခြင်းသာဖြစ်သည်။ စာဖတ်သူထံ ထုတ်ဝေခြင်းကို သီးခြားလုပ်ရသည်။
     store = _store()
     production = next(
         (row for row in store.read_records("Story Production") if row.get("story_id") == story_id),
@@ -843,6 +938,9 @@ def admin_api_content_review(story_id):
     )
     if production is None:
         abort(404, "Production draft does not exist.")
+    if not production.get("myanmar_story"):
+        production["myanmar_story"] = store.read_texts("MYANMAR").get(story_id, "")
+    production["episodes_json"] = _episode_json(store, story_id, production)
     body = request.get_json(silent=True)
     action = body.get("action") if isinstance(body, dict) else None
     if action not in {"approve", "reject"}:
@@ -1075,6 +1173,8 @@ def edit_production(story_id):
     if production.get("myanmar_story") != old_story_text:
         production["audio_url"] = ""
         production["audio_status"] = "NOT_READY"
+        if production.get("draft_mode") in {"ORIGINAL_THEME", "MANUAL_ORIGINAL"}:
+            store.upsert_story({"story_id": story_id, "original_review_status": "PENDING"})
     production["content_review_status"] = "PENDING"
     production["approval_status"] = ""
     production["processing_status"] = "HUMAN_EDITING"
@@ -1121,6 +1221,7 @@ def edit_production(story_id):
 @app.post("/admin/story/<story_id>/publish")
 @_admin_required
 def approve_and_publish(story_id):
+    # Legacy admin form မှ ထုတ်ဝေသည်။ Global switch၊ rights၊ content၊ audio နှင့် လူအတည်ပြုချက် လိုသည်။
     store = _store(initialize=True)
     story = next(
         (row for row in store.read_records("Story Library") if row.get("story_id") == story_id),
@@ -1240,7 +1341,7 @@ def public_home():
         draft["episodes_json"] = _episode_json(
             store, record.get("story_id"), draft, segmented_episodes, episode_rows
         )
-        episodes = json.loads(draft.get("episodes_json") or "[]")
+        episodes = _public_learning(draft.get("episodes_json"), list)
         if record.get("category", "").upper() not in {"CHILDREN", "ADULT"}:
             continue
         if publication_blockers(
@@ -1256,7 +1357,7 @@ def public_home():
         draft["category"] = record.get("category", "")
         draft["story_id"] = record.get("story_id", "")
         draft["description"] = (draft.get("myanmar_story", "")[:180] + "…")
-        draft["episodes"] = json.loads(draft.get("episodes_json") or "[]")
+        draft["episodes"] = episodes
         stories.append(draft)
     query = request.args.get("q", "").strip()
     if query:
@@ -1290,7 +1391,7 @@ def public_story(story_id):
     if not draft.get("myanmar_story"):
         draft["myanmar_story"] = store.read_texts("MYANMAR").get(story_id, "")
     draft["episodes_json"] = _episode_json(store, story_id, draft)
-    episodes = json.loads(draft.get("episodes_json") or "[]")
+    episodes = _public_learning(draft.get("episodes_json"), list)
     if publication_blockers(
         {**library, **draft},
         episodes,
@@ -1316,6 +1417,7 @@ def public_story(story_id):
 
 @app.get("/api/stories")
 def public_stories():
+    # PUBLISHED မှတ်တမ်းရှိရုံမက လက်ရှိ review gate များပါ ပြည့်သောပုံပြင်ကိုသာ public API မှ ထုတ်ပေးသည်။
     store = _store()
     published_ids = {
         item.get("story_id") for item in store.read_records("Publishing History")
@@ -1336,7 +1438,7 @@ def public_stories():
         )
         if record.get("story_id") not in published_ids:
             continue
-        episodes = json.loads(draft.get("episodes_json") or "[]")
+        episodes = _public_learning(draft.get("episodes_json"), list)
         if publication_blockers(
             {**record, **draft},
             episodes,
@@ -1359,8 +1461,11 @@ def public_stories():
             "story_id": record["story_id"],
             "category": record["category"],
             "title": draft.get("myanmar_title", ""),
+            "cover_image_url": draft.get("cover_image_url", ""),
             "story": draft.get("myanmar_story", ""),
             "episodes": public_episodes,
+            "quiz": _public_learning(draft.get("quiz_json"), list),
+            "reflection": _public_reflection(draft.get("reflection_json")),
             "audio_url": (
                 draft.get("audio_url", "")
                 if draft.get("audio_status", "").upper() == "READY" else ""
@@ -1369,8 +1474,68 @@ def public_stories():
     return jsonify(result)
 
 
+def _public_learning(raw, expected_type):
+    try:
+        value = json.loads(raw or "null")
+    except (ValueError, TypeError):
+        return expected_type()
+    return value if isinstance(value, expected_type) else expected_type()
+
+
+def _public_reflection(raw):
+    try:
+        value = json.loads(raw or '""')
+    except (ValueError, TypeError):
+        return ""
+    return "\n".join(value) if isinstance(value, list) and all(isinstance(v, str) for v in value) else value if isinstance(value, str) else ""
+
+
+@app.get("/api/stories/<story_id>")
+def public_story_api(story_id):
+    records = public_stories().get_json()
+    story = next((row for row in records if row.get("story_id") == story_id), None)
+    if story is None:
+        abort(404)
+    return jsonify(story)
+
+
+from pyonpyin.mvp_api import register_mvp_api
+register_mvp_api(app, lambda: _store(), _admin_api_required)
+
+
+@app.before_request
+def begin_sqlite_mutation():
+    if (request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and request.path.startswith(("/admin/", "/api/admin/"))
+            and session.get("admin_authenticated") and storage_backend() == "sqlite"):
+        store = _store()
+        if hasattr(store, "transaction"):
+            transaction = store.transaction()
+            transaction.__enter__()
+            g.story_transaction = transaction
+
+
+@app.after_request
+def finish_sqlite_mutation(response):
+    transaction = g.pop("story_transaction", None)
+    if transaction is not None:
+        if response.status_code < 400:
+            transaction.__exit__(None, None, None)
+        else:
+            transaction.__exit__(RuntimeError, RuntimeError("Request failed"), None)
+    return response
+
+
+@app.teardown_request
+def rollback_sqlite_mutation(error):
+    transaction = g.pop("story_transaction", None)
+    if transaction is not None:
+        transaction.__exit__(RuntimeError, RuntimeError("Request interrupted"), None)
+
+
 @app.get("/health")
 def health():
+    # Process အလုပ်လုပ်နေမှုကိုသာပြသည်။ Sheets/API ဝန်ဆောင်မှုများ ကောင်းနေကြောင်း စစ်ထားခြင်းမဟုတ်ပါ။
     return jsonify({
         "status": "ok",
         "publishing_enabled": os.environ.get("PYONPYIN_PUBLISHING_ENABLED", "").lower() == "true",
@@ -1378,9 +1543,18 @@ def health():
     })
 
 
+@app.get("/ready")
+def readiness():
+    try:
+        _store().read_records("Story Library")
+    except Exception:
+        return jsonify({"status": "unavailable", "database": False}), 503
+    return jsonify({"status": "ready", "database": True})
+
+
 if __name__ == "__main__":
     if not os.environ.get("PYONPYIN_ADMIN_PASSWORD"):
         raise SystemExit("Set PYONPYIN_ADMIN_PASSWORD before starting the dashboard.")
     if not os.environ.get("PYONPYIN_SESSION_SECRET"):
         raise SystemExit("Set PYONPYIN_SESSION_SECRET before starting the dashboard.")
-    app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")))
+    app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")), load_dotenv=False)

@@ -30,6 +30,14 @@ from pyonpyin import web_app
 
 
 class WorkflowTests(unittest.TestCase):
+    def setUp(self):
+        # Keep legacy mocked Sheets tests independent of the developer's local MVP .env/database.
+        environment = patch.dict(os.environ, {
+            "PYONPYIN_STORAGE": "sheets", "PYONPYIN_ENV_FILE": "tests/nonexistent-offline.env",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_gemini_missing_api_key_has_clear_error_without_network_access(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
             with self.assertRaisesRegex(
@@ -666,8 +674,25 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(client.generate_draft(story, "source")["title"], "ခေါင်းစဉ်")
         output["episodes"][1]["content"] = "ပျောက်နေသည်"
         with patch.object(client, "_request", return_value=output):
-            with self.assertRaisesRegex(RuntimeError, "partition"):
-                client.generate_draft(story, "source")
+            rebuilt = client.generate_draft(story, "source")
+            self.assertEqual(rebuilt["story"], "စမ်းသပ် ပုံပြင်")
+            self.assertEqual("".join(ep["content"] for ep in rebuilt["episodes"]), rebuilt["story"])
+            self.assertTrue(rebuilt["episode_partition_rebuilt"])
+
+    def test_gemini_episode_reconstruction_preserves_long_story_and_cell_limits(self):
+        client = GeminiClient(api_key="test-key")
+        full_story = "မြန်မာပုံပြင်။ " * 4_000
+        output = {
+            "title": "ရှည်သောပုံပြင်", "story": full_story,
+            "episodes": [{"episode_number": 1, "title": "အပိုင်း", "content": "မတူသောစာသား"}],
+            "quiz": [{"question": "မေးခွန်း", "answer": "အဖြေ"}], "reflection": "စဉ်းစားရန်",
+        }
+        with patch.object(client, "_request", return_value=output):
+            result = client.generate_draft({"category": "CHILDREN", "draft_mode": "ORIGINAL_THEME"}, "")
+        self.assertEqual("".join(ep["content"] for ep in result["episodes"]), full_story)
+        self.assertTrue(all(0 < len(ep["content"]) <= 40_000 for ep in result["episodes"]))
+        self.assertGreater(len(result["episodes"]), 1)
+        self.assertEqual([ep["episode_number"] for ep in result["episodes"]], list(range(1, len(result["episodes"]) + 1)))
 
     def test_pipeline_processes_only_explicitly_queued_rights_cleared_story(self):
         story = {
@@ -1518,6 +1543,7 @@ class WorkflowTests(unittest.TestCase):
 
         store = FakeStore()
         settings = {
+            "PYONPYIN_STORAGE": "sheets",
             "PYONPYIN_GITHUB_DISPATCH_ENABLED": "true",
             "PYONPYIN_GEMINI_AUTOMATION_ENABLED": "true",
             "PYONPYIN_GITHUB_TOKEN": "test-token-not-a-real-credential",
@@ -1597,6 +1623,7 @@ class WorkflowTests(unittest.TestCase):
                 self.history.append(dict(row))
 
         settings = {
+            "PYONPYIN_STORAGE": "sheets",
             "PYONPYIN_GITHUB_DISPATCH_ENABLED": "true",
             "PYONPYIN_GEMINI_AUTOMATION_ENABLED": "true",
             "PYONPYIN_GITHUB_TOKEN": "test-token",
@@ -1645,6 +1672,9 @@ class WorkflowTests(unittest.TestCase):
         class FakeStore:
             writes = []
             episode_writes = []
+
+            def read_texts(self, _kind):
+                return {}
 
             def read_records(self, sheet):
                 if sheet == "Story Library":

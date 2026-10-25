@@ -10,6 +10,7 @@ interface DemoAudioPlayerProps {
 }
 
 function createPreviewWav(frequency: number, duration: number): Blob {
+  // Player စမ်းရန် sine wave အသံကို WAV အဖြစ်ထုတ်သည်။ ပုံပြင်ဖတ်ပြသည့် TTS အသံမဟုတ်ပါ။
   const sampleRate = 22050;
   const frameCount = sampleRate * duration;
   const buffer = new ArrayBuffer(44 + frameCount * 2);

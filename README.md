@@ -1,5 +1,24 @@
 # PyonPyin AI Story Platform
 
+**Current MVP (2026-10-25):** SQLite storage, a durable local worker queue,
+original-story review, publish/unpublish APIs, reviewed audio uploads, and Gemini
+and Azure speech adapters are implemented. Gemini TTS is the default and shares
+the story-generation API key, so no Microsoft account is required. The existing React UI has functional controls for
+testing this workflow; a visual redesign remains separate. Live structured Myanmar
+story generation and a short Gemini speech sample have now passed with the locally
+configured key. Public deployment has not been performed.
+
+Start with the current [မြန်မာလို setup/account/key လမ်းညွှန်](docs/MVP_SETUP_MM.md)
+and [API contract for replacement websites](docs/MVP_API.md). SQLite needs no database
+account, Sheets credentials, or GitHub token. A Gemini key enables both story and
+speech jobs; Azure credentials are needed only if Azure is explicitly selected.
+AI jobs remain disabled until opted in. The older Sheets-first reference below describes
+the legacy integration; the current setup guide supersedes its default storage,
+audio, and React publishing limitations.
+
+မြန်မာလို code ရှင်းလင်းချက်နှင့် လက်ရှိ MVP လိုအပ်ချက်များကို
+[MVP စစ်ဆေးချက်](docs/MVP_REVIEW_MM.md) တွင် ဖတ်နိုင်ပါသည်။
+
 Implementation status, setup/secrets, deployment, and test guidance:
 [MVP plan](docs/MVP_IMPLEMENTATION_PLAN.md) ·
 [Architecture](docs/ARCHITECTURE.md) ·

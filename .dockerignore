@@ -8,6 +8,11 @@ frontend/node_modules
 frontend/dist
 frontend/.env.local
 data/audio
+data/runtime
+data/backups
+**/*.db
+**/*.db-wal
+**/*.db-shm
 **/token.json
 **/*service-account*.json
 **/*credentials*.json
